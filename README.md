@@ -165,6 +165,27 @@ Factorio 2.0 details that are easy to get wrong, all verified against a live gam
   against installed **capacity** for real headroom.
 - `require` only works at control.lua parse time, never from a console command.
 
+## Chat pane rendering: two separate traps
+
+Both make **every affected label render as nothing** while the element is still present
+with the correct caption — reading them back over RCON shows the full text, only the
+rendering is gone, and it never recovers. Both were found by A/B on a live game.
+
+**1. `scroll_to_bottom()` blanks the pane.** Identical labels render correctly; add one
+`scroll_to_bottom()` call and they all go blank, sometimes without even a scrollbar.
+Deferring it to a later tick does not help. There is no auto-scroll in the chat window
+as a result.
+
+**2. A wrapping label needs an explicit `style.width`, not `maximal_width`.** A label
+created with an empty caption and appended to afterwards — exactly what streaming does —
+never re-lays-out under `maximal_width` and stays invisible. `style.width = 560` works
+for both the create-with-text and create-empty-then-append cases.
+
+Both were expensive to find because **labels short enough to fit on one line render fine
+either way**. The bugs only appear once content wraps, which is every real answer and
+none of the obvious first tests. If you are debugging this pane again, test with text
+long enough to wrap, and trust the screen over the property read-back.
+
 ## Things that do not work, and why
 
 Tested against Factorio 2.0.77, not assumed:

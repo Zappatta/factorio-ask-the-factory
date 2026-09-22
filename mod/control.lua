@@ -62,12 +62,15 @@ end
 local function add_line(player, text, color)
   local scroll = get_scroll(player)
   if not scroll then return nil end
+  -- An explicit width is required, not maximal_width: a wrapping label whose caption
+  -- is appended to after creation never re-lays-out under maximal_width and renders
+  -- as nothing. See the scroll-pane notes in the README.
   local lbl = scroll.add{type = "label", caption = text}
   lbl.style.single_line = false
-  lbl.style.maximal_width = 580
-  lbl.style.bottom_margin = 4
+  lbl.style.width = 560
   if color then lbl.style.font_color = color end
-  scroll.scroll_to_bottom()
+  -- No scroll_to_bottom here: on this pane it blanks every label it contains.
+  -- See the scroll-pane note in the README.
   return lbl
 end
 
@@ -143,7 +146,7 @@ local function open_window(player)
   end
 
   if not bridge_alive() then
-    add_line(player, "[color=orange]Bridge daemon has not checked in. Start it with run.sh.[/color]")
+    add_line(player, "[color=orange]Bridge daemon has not checked in - check the launcher log.[/color]")
   end
 
   tf.focus()
@@ -165,6 +168,7 @@ local function submit(player, question)
 
   storage.req_id = storage.req_id + 1
   local id = storage.req_id
+  storage.pending[id] = nil
 
   local prompt = "[color=100,180,255]> " .. question .. "[/color]"
   add_line(player, prompt)
@@ -173,7 +177,7 @@ local function submit(player, question)
   local ok, snap = pcall(snapshot.collect, player, storage.tier)
   if not ok then snap = {error = "snapshot failed: " .. tostring(snap)} end
 
-  storage.pending[id] = {player_index = player.index, labels = {}, chars = 0}
+  storage.pending[id] = {player_index = player.index, chars = 0, started = game.tick}
 
   write_bus(to_json{
     type = "ask",
@@ -186,6 +190,9 @@ local function submit(player, question)
     question = question,
     snapshot = snap,
   } .. "\n")
+
+  local status = add_line(player, "[color=150,150,150]thinking...[/color]")
+  if status then storage.pending[id].status_ref = status end
 
   if not bridge_alive() then
     add_line(player, "[color=orange]No bridge daemon detected - this may go unanswered.[/color]")
@@ -200,6 +207,11 @@ local function append_chunk(id, text)
   local scroll = get_scroll(player)
   if not scroll then return end
 
+  if p.status_ref and p.status_ref.valid then
+    p.status_ref.destroy()
+    p.status_ref = nil
+  end
+
   local lbl = p.label_ref and p.label_ref.valid and p.label_ref or nil
   if not lbl or p.chars > CHUNK_CHARS then
     lbl = add_line(player, "")
@@ -209,8 +221,27 @@ local function append_chunk(id, text)
   if not lbl then return end
   lbl.caption = lbl.caption .. text
   p.chars = p.chars + #text
-  scroll.scroll_to_bottom()
 end
+
+local PENDING_TIMEOUT_TICKS = 60 * 180
+
+script.on_nth_tick(30, function()
+  if not storage.pending then return end
+  for id, p in pairs(storage.pending) do
+    local elapsed = math.floor((game.tick - (p.started or game.tick)) / 60)
+    if p.status_ref and p.status_ref.valid then
+      if game.tick - (p.started or game.tick) > PENDING_TIMEOUT_TICKS then
+        p.status_ref.caption = "[color=255,120,120]no reply after " .. elapsed ..
+                               "s - check the bridge in the launcher log[/color]"
+        storage.pending[id] = nil
+      else
+        p.status_ref.caption = "[color=150,150,150]thinking... " .. elapsed .. "s[/color]"
+      end
+    elseif game.tick - (p.started or game.tick) > PENDING_TIMEOUT_TICKS then
+      storage.pending[id] = nil
+    end
+  end
+end)
 
 script.on_init(function()
   init_storage()
