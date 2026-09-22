@@ -192,6 +192,11 @@ class Bridge:
         cut = buffer.rfind("[[")
         if cut != -1 and "]]" not in buffer[cut:]:
             return buffer[:cut], buffer[cut:]
+        # A chunk can end on a lone "[" that is really the first half of "[[".
+        # Emitting it strips the marker's opening and the rest arrives piecemeal,
+        # so it never matches and the whole marker lands in the player's chat.
+        if buffer.endswith("["):
+            return buffer[:-1], "["
         return buffer, ""
 
     # ---- request handling -----------------------------------------------
