@@ -103,8 +103,9 @@ class Bridge:
 
     # ---- ping extraction ------------------------------------------------
 
-    def drain(self, buffer: str, req_id: int, player_index: int, final: bool):
-        """Strip complete ping markers, fire them, return (emittable, leftover)."""
+    def drain(self, buffer: str, req_id: int, player_index: int, final: bool,
+              collected: list | None = None):
+        """Strip complete ping markers, collect them, return (emittable, leftover)."""
         pings = []
 
         def take(match):
@@ -115,8 +116,9 @@ class Bridge:
         buffer = PING_RE.sub(take, buffer)
         for x, y, label in pings:
             log.info("ping %s,%s %s", x, y, label)
-            self.call_mod("ping", {"x": x, "y": y, "text": label,
-                                   "player_index": player_index})
+            if collected is not None:
+                collected.append({"x": x, "y": y, "text": label,
+                                  "player_index": player_index, "id": req_id})
 
         if final:
             return buffer, ""
@@ -160,14 +162,15 @@ class Bridge:
         messages = self.build_messages(req)
         cfg = self.cfg.get(backend, {})
 
-        buffer, emitted = "", []
+        buffer, emitted, pings = "", [], []
         pending, last_flush = "", time.time()
         started = time.time()
 
         try:
             for chunk in providers.stream(backend, cfg, SYSTEM, messages):
                 buffer += chunk
-                ready, buffer = self.drain(buffer, req_id, player_index, final=False)
+                ready, buffer = self.drain(buffer, req_id, player_index, final=False,
+                                           collected=pings)
                 if ready:
                     pending += ready
                     emitted.append(ready)
@@ -176,12 +179,15 @@ class Bridge:
                     self.send_text(req_id, pending)
                     pending, last_flush = "", now
 
-            ready, _ = self.drain(buffer, req_id, player_index, final=True)
+            ready, _ = self.drain(buffer, req_id, player_index, final=True,
+                                  collected=pings)
             pending += ready
             emitted.append(ready)
             if pending:
                 self.send_text(req_id, pending)
             self.call_mod("deliver", {"id": req_id, "text": "", "final": True})
+            for ping in pings:
+                self.call_mod("ping", ping)
 
         except providers.ProviderError as exc:
             log.error("provider failed: %s", exc)

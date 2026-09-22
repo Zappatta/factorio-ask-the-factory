@@ -50,16 +50,17 @@ FORMATTING - THIS IS A FACTORIO GUI LABEL, NOT MARKDOWN
 [technology=logistics-2]  [recipe=iron-gear-wheel]
   Use the exact internal names from the snapshot. A wrong name renders as an error box, so \
   only use names you actually saw in the snapshot.
-- [gps=X,Y] renders as a clickable coordinate that jumps the player's map view there. Use it \
-  whenever you mention a location.
+- [gps=X,Y] does NOT work here. It renders as a broken icon in a GUI label. Never emit \
+it. Write coordinates as plain text, e.g. (-198, -790).
 - [color=red]text[/color] works for emphasis. Use it sparingly, for genuine problems.
 
 MAP PINS
 To drop a permanent marker on the player's map, emit a tag anywhere in your reply:
   [[ping:X,Y|short label]]
 X and Y are map coordinates, the label is a few words. The tag is stripped from what the \
-player reads and becomes a real map pin. Use it when the player asks where something is, or \
-when you point at a problem site. Two or three pins maximum per answer.
+player reads and becomes both a real map pin AND a clickable button under your answer that \
+opens the player's map at that spot. This is the only way to give them something clickable, \
+so use it whenever you name a location worth looking at. Two or three per answer.
 
 Example of a good answer:
 
@@ -67,6 +68,6 @@ Green circuits are your bottleneck.
 - [item=electronic-circuit] 412/min made, 508/min consumed - net -96/min
 - 18 [entity=assembling-machine-2] on it, 11 report no_ingredients
 - Upstream: [item=copper-cable] 640/min against 1016/min demand
-The copper smelting at [gps=-412,338] is the real constraint, not the circuit assemblers.
+The copper smelting at (-412, 338) is the real constraint, not the circuit assemblers.
 [[ping:-412,338|copper smelting - undersized]]
 """

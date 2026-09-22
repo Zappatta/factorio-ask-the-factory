@@ -8,6 +8,8 @@ local INPUT = "llm_scout_input"
 local BACKEND_DD = "llm_scout_backend"
 local TOP_BUTTON = "llm_scout_top_button"
 local CHUNK_CHARS = 1800
+local WINDOW_WIDTH = 700
+local CHAT_WIDTH = 624
 local BRIDGE_STALE_TICKS = 60 * 30
 
 local function to_json(t)
@@ -67,7 +69,7 @@ local function add_line(player, text, color)
   -- as nothing. See the scroll-pane notes in the README.
   local lbl = scroll.add{type = "label", caption = text}
   lbl.style.single_line = false
-  lbl.style.width = 560
+  lbl.style.width = CHAT_WIDTH
   if color then lbl.style.font_color = color end
   -- No scroll_to_bottom here: on this pane it blanks every label it contains.
   -- See the scroll-pane note in the README.
@@ -96,7 +98,7 @@ local function open_window(player)
 
   local frame = player.gui.screen.add{type = "frame", name = WINDOW, direction = "vertical"}
   frame.auto_center = true
-  frame.style.width = 640
+  frame.style.width = WINDOW_WIDTH
 
   local titlebar = frame.add{type = "flow", direction = "horizontal"}
   titlebar.drag_target = frame
@@ -128,9 +130,13 @@ local function open_window(player)
   controls.add{type = "button", name = "llm_scout_clear", caption = {"llm-scout.clear"}}
 
   local scroll = inner.add{type = "scroll-pane", name = SCROLL, direction = "vertical"}
-  scroll.style.height = 400
+  scroll.style.height = 440
   scroll.style.horizontally_stretchable = true
   scroll.vertical_scroll_policy = "auto"
+  pcall(function()
+    scroll.style.vertical_spacing = 6
+    scroll.style.padding = 4
+  end)
 
   local row = inner.add{type = "flow", direction = "horizontal"}
   row.style.top_margin = 6
@@ -170,7 +176,12 @@ local function submit(player, question)
   local id = storage.req_id
   storage.pending[id] = nil
 
-  local prompt = "[color=100,180,255]> " .. question .. "[/color]"
+  local scroll = get_scroll(player)
+  if scroll and #scroll.children > 0 then
+    pcall(function() scroll.add{type = "line"} end)
+  end
+
+  local prompt = "[color=120,190,255]" .. question .. "[/color]"
   add_line(player, prompt)
   remember(player, prompt)
 
@@ -271,6 +282,23 @@ script.on_event(defines.events.on_gui_click, function(e)
   local el = e.element
   if not (el and el.valid) then return end
   local player = game.get_player(e.player_index)
+
+  local tags = el.tags
+  if tags and tags.llm_scout_goto then
+    -- 2.0 removed LuaPlayer.open_map and zoom_to_world; the remote controller
+    -- is the replacement. Report failures rather than swallowing them.
+    local ok, err = pcall(function()
+      player.set_controller{
+        type = defines.controllers.remote,
+        position = {x = tags.x, y = tags.y},
+        surface = player.surface,
+      }
+    end)
+    if not ok then
+      player.print("[LLM Scout] could not open the map there: " .. tostring(err))
+    end
+    return
+  end
 
   if el.name == TOP_BUTTON then
     toggle_window(player)
@@ -426,5 +454,29 @@ remote.add_interface("llm_scout", {
         text = d.text or "LLM Scout",
       })
     end)
+
+    -- [gps=] rich text does not render inside GUI labels, so a location becomes
+    -- a button that opens the map instead.
+    local scroll = get_scroll(player)
+    if not scroll then return end
+
+    -- Group a request's locations into one row rather than a stack of wide buttons.
+    local row_name = "llm_scout_places_" .. tostring(d.id or 0)
+    local row = scroll[row_name]
+    if not row then
+      row = scroll.add{type = "flow", name = row_name, direction = "horizontal"}
+      pcall(function() row.style.horizontal_spacing = 4 end)
+    end
+    local btn = row.add{
+      type = "button",
+      caption = string.format("%s  (%d, %d)", d.text or "location", d.x, d.y),
+      tooltip = "Show this on the map",
+    }
+    pcall(function()
+      btn.style.height = 26
+      btn.style.font = "default-small"
+      btn.style.padding = {0, 8, 0, 8}
+    end)
+    btn.tags = {llm_scout_goto = true, x = d.x, y = d.y}
   end,
 })

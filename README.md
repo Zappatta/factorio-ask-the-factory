@@ -186,6 +186,16 @@ either way**. The bugs only appear once content wraps, which is every real answe
 none of the obvious first tests. If you are debugging this pane again, test with text
 long enough to wrap, and trust the screen over the property read-back.
 
+## Locations are buttons, not gps tags
+
+`[gps=X,Y]` rich text does not render in a GUI label - it shows Factorio's broken-tag
+icon. It only works in chat. Locations therefore come through the `[[ping:x,y|label]]`
+marker, which produces both a map pin and a clickable button under the answer.
+
+Clicking one uses `player.set_controller{type = defines.controllers.remote, position=...}`.
+**`LuaPlayer.open_map` and `zoom_to_world` do not exist in 2.0** - the remote controller
+replaced them. Item, entity, recipe, technology and fluid tags all render fine.
+
 ## Things that do not work, and why
 
 Tested against Factorio 2.0.77, not assumed:
