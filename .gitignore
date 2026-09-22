@@ -1,0 +1,6 @@
+serverdata/
+server.log
+run.out
+launch.out
+__pycache__/
+launcher-gui/target/

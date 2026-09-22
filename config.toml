@@ -1,0 +1,37 @@
+[bridge]
+backend = "claude-cli"
+# Where the SERVER writes script-output. run.sh creates this.
+script_output_dir = "./serverdata/script-output"
+poll_interval = 0.2
+history_turns = 6               # prior Q/A pairs replayed as context
+log_level = "info"
+
+[snapshot]
+tier = "auto"                   # auto (full for Claude, compact for local) | compact | full
+
+[server]
+port = 34197          # game port the client connects to
+
+[rcon]
+host = "127.0.0.1"
+port = 27015
+password = "factorio-llm-scout"
+
+[claude-cli]
+model = "claude-sonnet-5"
+timeout = 180
+
+[anthropic-api]
+model = "claude-sonnet-5"
+max_tokens = 2000
+# api_key falls back to $ANTHROPIC_API_KEY
+
+[ollama]
+host = "http://localhost:11434"
+model = "llama3.1:8b"
+num_ctx = 16384
+
+[openai-compatible]
+base_url = "http://localhost:1234/v1"
+model = "local-model"
+api_key = ""

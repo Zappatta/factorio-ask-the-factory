@@ -1,0 +1,23 @@
+{
+  "name": "llm-scout local",
+  "description": "Local single-player session with RCON enabled for the LLM Scout bridge.",
+  "tags": [],
+  "max_players": 2,
+  "visibility": { "public": false, "lan": true },
+  "username": "",
+  "password": "",
+  "token": "",
+  "game_password": "",
+  "require_user_verification": false,
+  "max_upload_in_kilobytes_per_second": 0,
+  "max_upload_slots": 2,
+  "ignore_player_limit_for_returning_players": true,
+  "allow_commands": "true",
+  "autosave_interval": 10,
+  "autosave_slots": 3,
+  "afk_autokick_interval": 0,
+  "auto_pause": false,
+  "only_admins_can_pause_the_game": false,
+  "autosave_only_on_server": true,
+  "non_blocking_saving": true
+}

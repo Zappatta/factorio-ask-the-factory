@@ -1,0 +1,9 @@
+{
+  "name": "llm-scout",
+  "version": "0.1.0",
+  "factorio_version": "2.0",
+  "title": "LLM Scout",
+  "author": "yoske",
+  "description": "Chat with an LLM about your factory from inside the game. Requires the llm-scout bridge daemon running alongside a server with RCON enabled.",
+  "dependencies": ["base >= 2.0.0"]
+}
