@@ -13,6 +13,12 @@ local WINDOW_WIDTH = 700
 local CHAT_WIDTH = 624
 local BRIDGE_STALE_TICKS = 60 * 30
 
+local function safe(fn, default)
+  local ok, res = pcall(fn)
+  if ok and res ~= nil then return res end
+  return default
+end
+
 local function to_json(t)
   if helpers and helpers.table_to_json then return helpers.table_to_json(t) end
   return game.table_to_json(t)
@@ -244,6 +250,94 @@ local function direction_value(name)
   return defines.direction[string.lower(name)]
 end
 
+local BLOCK_SEED_TYPES = {
+  "assembling-machine", "furnace", "chemical-plant", "oil-refinery",
+  "centrifuge", "mining-drill", "lab", "rocket-silo", "reactor",
+}
+local BLOCK_MAX_ENTITIES = 300
+local BLOCK_MAX_SPAN = 72
+local BLOCK_MARGIN = 2
+
+-- Works out what a machine's "block" actually is by walking inserter links out from it,
+-- so the model only has to point at something rather than describe its extent.
+local function detect_block(player, x, y)
+  local surface, force = player.surface, player.force
+
+  local seed = surface.find_entities_filtered{
+    type = BLOCK_SEED_TYPES, force = force,
+    position = {x = x, y = y}, radius = 10, limit = 1}[1]
+  if not seed then
+    seed = surface.find_entities_filtered{
+      force = force, position = {x = x, y = y}, radius = 5, limit = 1}[1]
+  end
+  if not seed then return nil end
+
+  local found, seen = {}, {}
+  local function mark(entity)
+    if not (entity and entity.valid) then return false end
+    local key = entity.unit_number
+      or (entity.name .. "@" .. entity.position.x .. "," .. entity.position.y)
+    if seen[key] then return false end
+    seen[key] = true
+    found[#found + 1] = entity
+    return true
+  end
+
+  mark(seed)
+  local frontier = {seed}
+  for _ = 1, 3 do
+    if #found > BLOCK_MAX_ENTITIES then break end
+    local next_frontier = {}
+    for _, entity in pairs(frontier) do
+      local bb = entity.bounding_box
+      local around = {
+        {bb.left_top.x - 1.5, bb.left_top.y - 1.5},
+        {bb.right_bottom.x + 1.5, bb.right_bottom.y + 1.5},
+      }
+      local inserters = safe(function()
+        return surface.find_entities_filtered{type = "inserter", force = force, area = around}
+      end, {})
+      for _, ins in pairs(inserters) do
+        mark(ins)
+        for _, target in pairs({ins.pickup_target, ins.drop_target}) do
+          if mark(target) then next_frontier[#next_frontier + 1] = target end
+        end
+        for _, pos in pairs({ins.pickup_position, ins.drop_position}) do
+          local near = safe(function()
+            return surface.find_entities_filtered{position = pos, radius = 0.6, force = force}
+          end, {})
+          for _, e in pairs(near) do
+            if mark(e) then next_frontier[#next_frontier + 1] = e end
+          end
+        end
+      end
+    end
+    frontier = next_frontier
+    if #frontier == 0 then break end
+  end
+
+  local minx, miny, maxx, maxy
+  for _, entity in pairs(found) do
+    local bb = entity.bounding_box
+    minx = math.min(minx or bb.left_top.x, bb.left_top.x)
+    miny = math.min(miny or bb.left_top.y, bb.left_top.y)
+    maxx = math.max(maxx or bb.right_bottom.x, bb.right_bottom.x)
+    maxy = math.max(maxy or bb.right_bottom.y, bb.right_bottom.y)
+  end
+  if not minx then return nil end
+
+  minx, miny = minx - BLOCK_MARGIN, miny - BLOCK_MARGIN
+  maxx, maxy = maxx + BLOCK_MARGIN, maxy + BLOCK_MARGIN
+
+  -- A runaway walk along a shared belt must not turn into a base-sized rectangle.
+  local sx, sy = seed.position.x, seed.position.y
+  local half = BLOCK_MAX_SPAN / 2
+  if maxx - minx > BLOCK_MAX_SPAN then minx, maxx = sx - half, sx + half end
+  if maxy - miny > BLOCK_MAX_SPAN then miny, maxy = sy - half, sy + half end
+
+  return {{minx, miny}, {maxx, maxy}}, #found, seed
+end
+
 local function capture_area(player, area)
   local inv = game.create_inventory(1)
   inv[1].set_stack{name = "blueprint"}
@@ -400,6 +494,15 @@ local function execute_build(player, id, row, as_ghost)
     if ok and entity and entity.valid then
       if spec.recipe and not as_ghost then
         pcall(function() entity.set_recipe(spec.recipe) end)
+      end
+      if spec.requests and not as_ghost then
+        pcall(function()
+          local sections = entity.get_logistic_sections()
+          local section = sections.sections[1] or sections.add_section()
+          for i, req in pairs(spec.requests) do
+            section.set_slot(i, {value = req.name, min = req.count})
+          end
+        end)
       end
       created[#created + 1] = {ref = entity, name = spec.name, x = spec.x, y = spec.y}
     else
@@ -716,6 +819,42 @@ remote.add_interface("llm_scout", {
     }
     local player = game.get_player(d.player_index or 1)
     if player then render_offer(player, d.id) end
+  end,
+
+  -- The model points at one machine; we work out the block and clone that.
+  clone_like = function(js)
+    local d = from_json(js)
+    if not d or not d.id then return end
+    local player = game.get_player(d.player_index or 1)
+    if not player then return end
+
+    local area, reached, seed = detect_block(player, d.x, d.y)
+    if not area then
+      add_line(player, "[color=255,120,120]Found nothing to copy near (" ..
+        math.floor(d.x) .. ", " .. math.floor(d.y) .. ").[/color]")
+      return
+    end
+
+    local offer = {
+      kind = "clone",
+      label = d.label or ("copy of " .. seed.name),
+      area = area,
+      dest = {x = d.dx, y = d.dy},
+      player_index = d.player_index or 1,
+    }
+    offer.count = clone_count(player, offer)
+    if offer.count == 0 then
+      add_line(player, "[color=255,120,120]That block captured nothing.[/color]")
+      return
+    end
+
+    storage.offers[d.id] = offer
+    add_line(player, string.format(
+      "[color=170,170,170]Block around %s at (%d, %d): %d linked entities, " ..
+      "capturing %d in a %dx%d area.[/color]",
+      seed.name, math.floor(seed.position.x), math.floor(seed.position.y), reached,
+      offer.count, math.ceil(area[2][1] - area[1][1]), math.ceil(area[2][2] - area[1][2])))
+    render_offer(player, d.id)
   end,
 
   clone_offer = function(js)

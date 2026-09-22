@@ -27,6 +27,10 @@ FLUSH_CHARS = 60
 FLUSH_SECONDS = 0.20
 PING_RE = re.compile(r"\[\[ping:\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*(?:\|([^\]]*))?\]\]")
 BUILD_RE = re.compile(r"\[\[build:([^\n\]]*)\n(.*?)\]\]", re.DOTALL)
+CLONE_LIKE_RE = re.compile(
+    r"\[\[clone_like:\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)"
+    r"\s*(?:->|to)\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)"
+    r"\s*(?:\|([^\]]*))?\]\]", re.IGNORECASE)
 CLONE_RE = re.compile(
     r"\[\[clone:([^\n\]]*)\n"
     r"\s*from:\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)"
@@ -79,7 +83,12 @@ class Bridge:
         try:
             out = self.rcon.command(cmd)
             if out and out.strip():
-                log.debug("rcon said: %s", out.strip()[:200])
+                text = out.strip()
+                # A Lua error inside the mod comes back here; do not bury it in debug.
+                if "Error" in text or "error" in text[:40]:
+                    log.error("mod error from %s: %s", fn, text[:400])
+                else:
+                    log.debug("rcon said: %s", text[:200])
         except RconError as exc:
             log.warning("rcon %s failed: %s", fn, exc)
 
@@ -132,6 +141,20 @@ class Bridge:
             if spec["entities"]:
                 builds.append(spec)
             return ""
+
+        like = []
+
+        def take_like(match):
+            x, y, dx, dy, label = match.groups()
+            like.append({"x": float(x), "y": float(y), "dx": float(dx), "dy": float(dy),
+                         "label": (label or "").strip() or "copy of this block"})
+            return ""
+
+        buffer = CLONE_LIKE_RE.sub(take_like, buffer)
+        for spec in like:
+            log.info("clone_like: (%s,%s) -> (%s,%s)  %s",
+                     spec["x"], spec["y"], spec["dx"], spec["dy"], spec["label"])
+            self.call_mod("clone_like", dict(spec, id=req_id, player_index=player_index))
 
         clones = []
 
@@ -196,6 +219,13 @@ class Bridge:
                     continue
                 if extra.lower() in DIRECTIONS:
                     spec["direction"] = extra.lower()
+                elif ":" in extra:
+                    item, _, count = extra.partition(":")
+                    try:
+                        spec.setdefault("requests", []).append(
+                            {"name": item.strip(), "count": int(count)})
+                    except ValueError:
+                        errors.append(f"line {lineno}: bad request {extra!r}")
                 else:
                     spec["recipe"] = extra
             entities.append(spec)

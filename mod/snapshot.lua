@@ -382,6 +382,36 @@ local function collect_alerts(player)
   return {counts = counts, examples = examples}
 end
 
+local PLACEABLE_HINTS = {
+  "inserter", "fast-inserter", "long-handed-inserter", "bulk-inserter",
+  "transport-belt", "fast-transport-belt", "express-transport-belt",
+  "underground-belt", "splitter", "pipe", "pipe-to-ground", "medium-electric-pole",
+  "small-electric-pole", "big-electric-pole", "substation", "steel-chest",
+  "iron-chest", "wooden-chest", "passive-provider-chest", "active-provider-chest",
+  "requester-chest", "buffer-chest", "storage-chest",
+}
+
+-- Footprints, so placement arithmetic is exact rather than remembered. Entities are
+-- positioned on their centre, so two 3x3 machines must be 3 tiles apart.
+local function collect_footprints(force, surface, groups)
+  local names = {}
+  for _, hint in pairs(PLACEABLE_HINTS) do names[hint] = true end
+  for _, group in pairs(groups or {}) do
+    for machine in pairs(group.machines or {}) do names[machine] = true end
+  end
+
+  local out = {}
+  for name in pairs(names) do
+    local proto = safe(function() return prototypes.entity[name] end)
+    if proto then
+      local w = safe(function() return proto.tile_width end, 1)
+      local h = safe(function() return proto.tile_height end, 1)
+      out[name] = w .. "x" .. h
+    end
+  end
+  return out
+end
+
 local function collect_census(force, surface)
   local census = {}
   for _, t in pairs(CENSUS_TYPES) do
@@ -483,6 +513,12 @@ function M.collect(player, tier)
   end
 
   if full then
+    snap.footprints = {
+      sizes = collect_footprints(force, surface, snap.machines.groups),
+      note = "tile width x height. Entities sit on their CENTRE, so two 3x3 machines "
+          .. "side by side are 3 apart, and a 1x1 inserter tucks into the tile "
+          .. "immediately beside a 3x3 machine, 2 tiles from its centre.",
+    }
     snap.census = collect_census(force, surface)
     snap.logistics = collect_logistics(force, surface)
   end
