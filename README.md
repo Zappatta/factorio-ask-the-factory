@@ -44,8 +44,16 @@ already connected. In game press **Ctrl+Shift+L**.
 **Stop** shuts it down cleanly and writes a final save. **Export session…** copies your
 progress back to your normal saves folder.
 
-Needs Python 3 on PATH, because the bridge daemon is still Python. Porting it to Rust so
-the launcher is a single self-contained binary is the plan.
+The launcher is one self-contained binary: no Python, no runtime to install. The system
+prompt is baked in, but a `prompt.txt` beside the executable or at the project root
+overrides it without a rebuild.
+
+To ask a one-off question from a terminal while a session is running:
+
+```
+./launcher-gui/target/release/llmscout-launcher --ask "why is my coal backed up?"
+./launcher-gui/target/release/llmscout-launcher --ask "..." --show-snapshot
+```
 
 ## Models
 

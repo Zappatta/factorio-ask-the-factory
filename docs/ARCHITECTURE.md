@@ -102,7 +102,8 @@ and position.
 
 ## Backends
 
-`bridge/providers.py`, one generator per backend yielding text chunks.
+`src/bridge/providers.rs`, one streaming function per backend. Blocking HTTP via `ureq`,
+deliberately no async runtime — the bridge owns a thread already.
 
 `claude-cli` spawns `claude -p --output-format stream-json --include-partial-messages` and
 reads `content_block_delta` events. It runs with MCP servers, settings and tools stripped
@@ -116,19 +117,20 @@ session, so conversation history is replayed manually by the bridge.
 
 | Changed | Needs |
 |---|---|
-| `bridge/*.py`, including `prompt.py` | bridge restart only, session untouched |
+| `assets/prompt.txt`, or a `prompt.txt` beside the binary | nothing — the on-disk copy wins over the embedded one and is re-read per question |
+| Rust sources | rebuild and relaunch the launcher |
 | `mod/*.lua` | full Stop → Resume; Factorio fixes mod code at load |
 
 ### Tools
 
 ```bash
-python3 bridge/ask.py "why is my coal backed up?"   # ask from a terminal
-python3 bridge/ask.py "..." --show-snapshot         # dump what the model sees
-python3 bridge/bridge.py --verbose                  # bridge alone, chatty
-./launcher-gui/target/release/llmscout-launcher --check
+llmscout-launcher --check                      # what it detected, no window
+llmscout-launcher --ask "why is my coal backed up?"
+llmscout-launcher --ask "..." --backend ollama --show-snapshot
 ```
 
-The launcher starts the bridge itself, so running it by hand is only for debugging.
+`--ask` talks to a running session over RCON and prints to stdout, which is the quickest
+way to iterate on the prompt without going through the GUI.
 
 `bridge/logs/answers.log` records every raw model response **before** marker stripping.
 First place to look when something the model emitted did not take effect.
@@ -144,11 +146,11 @@ Debug endpoints over RCON:
 
 ```bash
 lua -e "assert(loadfile('mod/control.lua'))" && lua -e "assert(loadfile('mod/snapshot.lua'))"
-python3 -c "import ast,glob;[ast.parse(open(f).read()) for f in glob.glob('bridge/*.py')]"
+cd launcher-gui && cargo test && cargo build --release
 ```
 
-Syntax only. Lua resolves globals at call time, so a missing function passes the gate and
-dies at runtime — a real one shipped this way. Run the thing.
+The Lua check is syntax only. Lua resolves globals at call time, so a missing function
+passes the gate and dies at runtime — a real one shipped this way. Run the thing.
 
 ### Layout
 
@@ -156,15 +158,19 @@ dies at runtime — a real one shipped this way. Run the thing.
 mod/
   control.lua       GUI, events, remote interface, placement and clone execution
   snapshot.lua      state collection
-bridge/
-  bridge.py         tail bus file → provider → RCON, marker parsing
-  providers.py      the four backends
-  prompt.py         system prompt
-  rcon.py           Source RCON client, stdlib only
-  ask.py            terminal dev tool
-  logs/             raw model answers (generated)
+launcher-gui/
+  src/main.rs       egui UI, --check and --ask
+  src/factorio.rs   path discovery, save listing, mod mirroring
+  src/session.rs    server lifecycle; runs the bridge on its own thread
+  src/rcon.rs       Source RCON client
+  src/config.rs     reads config.toml
+  src/bridge/
+    mod.rs          bus tailer → provider → RCON, answer logs
+    markers.rs      marker parsing and the streaming hold-back
+    providers.rs    the four backends
+  assets/prompt.txt system prompt, embedded at build time
 config.toml
-launcher-gui/       Rust + egui launcher
+bridge/logs/        raw model answers (generated)
 serverdata/         server write-data (generated)
 ```
 
@@ -237,19 +243,11 @@ The 0.36 release reworked the app API from what most examples still show:
 - panels and `CentralPanel` take `&mut Ui`, not `&Context`; reach the context with
   `ui.ctx()`
 
-## Planned: one binary
+## Single binary
 
-The end state is a single downloadable executable per platform, with no runtime
-dependencies — users should not need Python or Rust installed.
+The launcher is self-contained: the bridge runs on a thread inside it, the system prompt is
+embedded with `include_str!`, and there is no Python or other runtime dependency. Users
+download one executable.
 
-That means porting the bridge from Python to Rust: RCON already exists there, marker
-parsing is a direct translation, and the providers need one blocking HTTP client (`ureq`
-rather than an async runtime, since the bridge runs on its own thread). Roughly 700-900
-lines of largely mechanical work.
-
-Alongside it, embedding the Lua mod with `include_dir!` and the prompt with `include_str!`
-so nothing has to sit beside the binary. A `prompt.txt` next to the executable would
-override the embedded copy, keeping prompt iteration fast without a rebuild.
-
-Worth doing once placing has settled — porting while the markers and prompt are still
-changing weekly means rewriting the same Rust repeatedly.
+A `prompt.txt` placed beside the binary overrides the embedded copy, so the prompt can be
+iterated on without a rebuild.

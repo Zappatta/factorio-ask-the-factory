@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod bridge;
 mod config;
 mod factorio;
 mod rcon;
@@ -46,7 +47,6 @@ struct App {
     cfg_error: Option<String>,
     data_dir: Option<PathBuf>,
     binary: Option<PathBuf>,
-    python: Option<String>,
     saves: Vec<SaveEntry>,
     selected: Option<usize>,
     backend: String,
@@ -78,7 +78,6 @@ impl App {
             cfg_error,
             data_dir,
             binary: factorio::detect_binary(),
-            python: session::detect_python(),
             saves,
             selected: None,
             backend,
@@ -107,9 +106,6 @@ impl App {
         if self.data_dir.is_none() {
             return Some("Factorio data folder not found — set it above".into());
         }
-        if self.python.is_none() {
-            return Some("Python 3 not on PATH — the bridge daemon needs it".into());
-        }
         None
     }
 
@@ -118,12 +114,9 @@ impl App {
     }
 
     fn launch(&mut self, save: Option<PathBuf>) {
-        let (Some(cfg), Some(binary), Some(data_dir), Some(python)) = (
-            self.cfg.clone(),
-            self.binary.clone(),
-            self.data_dir.clone(),
-            self.python.clone(),
-        ) else {
+        let (Some(cfg), Some(binary), Some(data_dir)) =
+            (self.cfg.clone(), self.binary.clone(), self.data_dir.clone())
+        else {
             return;
         };
         let _ = Config::save_backend(&self.root.join("config.toml"), &self.backend);
@@ -138,7 +131,6 @@ impl App {
             save,
             backend: self.backend.clone(),
             launch_client: self.launch_client,
-            python,
             cfg,
         }));
     }
@@ -328,7 +320,10 @@ impl eframe::App for App {
                 ui.separator();
                 egui::ScrollArea::vertical().stick_to_bottom(true).show(ui, |ui| {
                     for line in log {
-                        let color = if line.contains("[error]") || line.contains("WARNING") {
+                        let color = if line.contains("[error]")
+                            || line.contains("WARNING")
+                            || line.contains("ERROR")
+                        {
                             egui::Color32::from_rgb(230, 140, 140)
                         } else if line.starts_with("[setup]") {
                             egui::Color32::from_rgb(140, 190, 240)
@@ -470,17 +465,54 @@ fn run_check() {
         }
         None => println!("data dir     : NOT FOUND"),
     }
-    match session::detect_python() {
-        Some(p) => println!("python       : {p}"),
-        None => println!("python       : NOT FOUND (bridge needs it)"),
-    }
     let sess = root.join("serverdata/saves/session.zip");
     println!("session save : {}", if sess.exists() { "present" } else { "none yet" });
 }
 
+/// A one-shot question from the terminal, the dev tool that used to be bridge/ask.py.
+fn run_ask(args: &[String]) -> Result<(), String> {
+    let mut question = None;
+    let mut backend = None;
+    let mut tier = "full".to_string();
+    let mut show_snapshot = false;
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        match arg.as_str() {
+            "--ask" => question = rest.next().cloned(),
+            "--backend" => backend = rest.next().cloned(),
+            "--tier" => {
+                if let Some(v) = rest.next() {
+                    tier = v.clone();
+                }
+            }
+            "--show-snapshot" => show_snapshot = true,
+            _ => {}
+        }
+    }
+    let question = question.ok_or("--ask needs a question")?;
+    let root = project_root();
+    let cfg = Config::load(&root.join("config.toml"))?;
+    bridge::ask_once(
+        &root,
+        &cfg,
+        &question,
+        backend.as_deref(),
+        &tier,
+        show_snapshot,
+    )
+}
+
 fn main() -> eframe::Result<()> {
-    if std::env::args().any(|a| a == "--check") {
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--check") {
         run_check();
+        return Ok(());
+    }
+    if args.iter().any(|a| a == "--ask") {
+        if let Err(e) = run_ask(&args) {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
         return Ok(());
     }
     let options = eframe::NativeOptions {

@@ -1,3 +1,4 @@
+use crate::bridge::{Bridge, BridgeOpts, LogSink};
 use crate::config::Config;
 use crate::factorio;
 use crate::rcon::Rcon;
@@ -26,7 +27,6 @@ pub struct LaunchOpts {
     pub save: Option<PathBuf>,
     pub backend: String,
     pub launch_client: bool,
-    pub python: String,
     pub cfg: Config,
 }
 
@@ -165,20 +165,30 @@ fn run(opts: LaunchOpts, tx: Sender<Event>, stop: Arc<AtomicBool>) -> Result<(),
     tx.send(Event::ServerUp).ok();
     tx.send(Event::Status("server up".into())).ok();
 
-    let mut bridge = Command::new(&opts.python)
-        .arg(opts.root.join("bridge").join("bridge.py"))
-        .arg("--config").arg(opts.root.join("config.toml"))
-        .arg("--backend").arg(&opts.backend)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("cannot start bridge ({}): {e}", opts.python))?;
-    if let Some(o) = bridge.stdout.take() {
-        pump(o, tx.clone(), "bridge", None, None);
-    }
-    if let Some(e) = bridge.stderr.take() {
-        pump(e, tx.clone(), "bridge", None, None);
+    let bridge_stop = Arc::new(AtomicBool::new(false));
+    let bridge_done = Arc::new(AtomicBool::new(false));
+    {
+        let bridge_opts = BridgeOpts {
+            root: opts.root.clone(),
+            cfg: opts.cfg.clone(),
+            backend: opts.backend.clone(),
+        };
+        let tx = tx.clone();
+        let stop = bridge_stop.clone();
+        let done = bridge_done.clone();
+        thread::spawn(move || {
+            let log_tx = tx.clone();
+            let sink: LogSink = Box::new(move |line: &str| {
+                let _ = log_tx.send(Event::Log(format!("[bridge] {line}")));
+            });
+            match Bridge::new(bridge_opts, sink, stop) {
+                Ok(mut bridge) => bridge.run(),
+                Err(e) => {
+                    let _ = tx.send(Event::Log(format!("[bridge] ERROR {e}")));
+                }
+            }
+            done.store(true, Ordering::SeqCst);
+        });
     }
     tx.send(Event::Log(format!("[setup] bridge started on backend {}", opts.backend))).ok();
 
@@ -209,7 +219,7 @@ fn run(opts: LaunchOpts, tx: Sender<Event>, stop: Arc<AtomicBool>) -> Result<(),
         }
         if let Ok(Some(status)) = server.try_wait() {
             tx.send(Event::Log(format!("[server] exited ({status})"))).ok();
-            let _ = bridge.kill();
+            wait_for_bridge(&bridge_stop, &bridge_done, &tx);
             if let Some(c) = client.as_mut() {
                 let _ = c.kill();
             }
@@ -218,8 +228,10 @@ fn run(opts: LaunchOpts, tx: Sender<Event>, stop: Arc<AtomicBool>) -> Result<(),
         thread::sleep(Duration::from_millis(300));
     }
 
-    // Quit over RCON so the server writes a final save.
+    // Quit over RCON so the server writes a final save. The bridge is told to stop
+    // first, or it spends the shutdown window retrying RCON against a dying server.
     tx.send(Event::Status("shutting down".into())).ok();
+    bridge_stop.store(true, Ordering::SeqCst);
     let quit = Rcon::connect(&rc.host, rc.port, &rc.password, Duration::from_secs(5))
         .and_then(|mut c| c.command("/quit"));
     match quit {
@@ -242,7 +254,7 @@ fn run(opts: LaunchOpts, tx: Sender<Event>, stop: Arc<AtomicBool>) -> Result<(),
             _ => thread::sleep(Duration::from_millis(300)),
         }
     }
-    let _ = bridge.kill();
+    wait_for_bridge(&bridge_stop, &bridge_done, &tx);
     if let Some(c) = client.as_mut() {
         let _ = c.kill();
     }
@@ -250,18 +262,16 @@ fn run(opts: LaunchOpts, tx: Sender<Event>, stop: Arc<AtomicBool>) -> Result<(),
     Ok(())
 }
 
-pub fn detect_python() -> Option<String> {
-    for cand in ["python3", "python"] {
-        if Command::new(cand)
-            .arg("--version")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
-        {
-            return Some(cand.to_string());
+/// The bridge can be mid-answer when the user hits stop, so give it a moment to
+/// notice the flag rather than blocking the GUI on a whole model response.
+fn wait_for_bridge(stop: &Arc<AtomicBool>, done: &Arc<AtomicBool>, tx: &Sender<Event>) {
+    stop.store(true, Ordering::SeqCst);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !done.load(Ordering::SeqCst) {
+        if Instant::now() > deadline {
+            tx.send(Event::Log("[setup] bridge still finishing, leaving it to wind down".into())).ok();
+            return;
         }
+        thread::sleep(Duration::from_millis(50));
     }
-    None
 }
