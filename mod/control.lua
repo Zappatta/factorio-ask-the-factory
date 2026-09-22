@@ -8,6 +8,7 @@ local INPUT = "llm_scout_input"
 local BACKEND_DD = "llm_scout_backend"
 local TOP_BUTTON = "llm_scout_top_button"
 local CHUNK_CHARS = 1800
+local MAX_BUILD_ENTITIES = 300
 local WINDOW_WIDTH = 700
 local CHAT_WIDTH = 624
 local BRIDGE_STALE_TICKS = 60 * 30
@@ -38,6 +39,9 @@ local function init_storage()
   storage.tier = storage.tier or "auto"
   storage.bridge_tick = storage.bridge_tick or -1
   storage.history = storage.history or {}
+  storage.offers = storage.offers or {}
+  storage.builds = storage.builds or {}
+  storage.offer_parts = storage.offer_parts or {}
 end
 
 local function bridge_alive()
@@ -234,6 +238,243 @@ local function append_chunk(id, text)
   p.chars = p.chars + #text
 end
 
+local function direction_value(name)
+  if type(name) == "number" then return name end
+  if type(name) ~= "string" then return nil end
+  return defines.direction[string.lower(name)]
+end
+
+local function capture_area(player, area)
+  local inv = game.create_inventory(1)
+  inv[1].set_stack{name = "blueprint"}
+  local captured = inv[1].create_blueprint{
+    surface = player.surface, force = player.force,
+    area = area, include_entities = true,
+  }
+  local count = captured and table_size(captured) or 0
+  return inv, count
+end
+
+local function clone_count(player, offer)
+  local inv, count = capture_area(player, offer.area)
+  inv.destroy()
+  return count
+end
+
+-- build_blueprint silently places nothing on ungenerated or uncharted ground.
+local function ensure_ground(player, position)
+  pcall(function()
+    player.surface.request_to_generate_chunks(position, 3)
+    player.surface.force_generate_chunk_requests()
+    player.force.chart(player.surface, {
+      {position.x - 48, position.y - 48}, {position.x + 48, position.y + 48}})
+  end)
+end
+
+local function clone_paste(player, offer, as_ghost)
+  ensure_ground(player, offer.dest)
+  local inv = capture_area(player, offer.area)
+  local ghosts = inv[1].build_blueprint{
+    surface = player.surface, force = player.force,
+    position = offer.dest, force_build = true,
+  }
+  inv.destroy()
+
+  local placed, failed = {}, 0
+  for _, ghost in pairs(ghosts or {}) do
+    if ghost.valid then
+      local name, pos = ghost.ghost_name, ghost.position
+      if as_ghost then
+        placed[#placed + 1] = {ref = ghost, name = name, x = pos.x, y = pos.y}
+      else
+        local ok, _, entity = pcall(function() return ghost.revive() end)
+        if ok and entity and entity.valid then
+          placed[#placed + 1] = {ref = entity, name = name, x = pos.x, y = pos.y}
+        else
+          failed = failed + 1
+        end
+      end
+    end
+  end
+  return placed, failed
+end
+
+local function set_offer_state(row, live)
+  if not (row and row.valid) then return end
+  local place, ghosts = row["llm_scout_place"], row["llm_scout_ghosts"]
+  if place and place.valid then
+    place.enabled = not live
+    place.tooltip = live and "Undo first to place again" or "Creates the entities immediately, for free."
+  end
+  if ghosts and ghosts.valid then
+    ghosts.enabled = not live
+    ghosts.tooltip = live and "Undo first to place again"
+      or "Places blueprint ghosts. Your construction robots build them from your own materials."
+  end
+end
+
+local function render_offer(player, id)
+  local offer = storage.offers[id]
+  if not offer then return end
+  local scroll = get_scroll(player)
+  if not scroll then return end
+
+  local row = scroll.add{type = "flow", name = "llm_scout_build_" .. id, direction = "horizontal"}
+  pcall(function() row.style.horizontal_spacing = 4 end)
+
+  local n = offer.kind == "clone" and offer.count or #offer.entities
+  local verb = offer.kind == "clone" and "Copy" or "Place"
+
+  local place = row.add{
+    type = "button", name = "llm_scout_place",
+    caption = string.format("%s  (%d)", verb, n),
+    tooltip = "Creates the entities immediately, for free.",
+    style = "green_button",
+  }
+  place.tags = {llm_scout_build = true, offer = id, ghost = false}
+
+  local ghosts = row.add{
+    type = "button", name = "llm_scout_ghosts",
+    caption = string.format("%s as ghosts  (%d)", verb, n),
+    tooltip = "Places blueprint ghosts. Your construction robots build them from your own materials.",
+  }
+  ghosts.tags = {llm_scout_build = true, offer = id, ghost = true}
+
+  for _, b in pairs({place, ghosts}) do
+    pcall(function() b.style.height = 28 b.style.font = "default-small" end)
+  end
+end
+
+local function execute_build(player, id, row, as_ghost)
+  local offer = storage.offers[id]
+  if not offer then return end
+  if storage.builds[id] then return end
+
+  if offer.kind == "clone" then
+    local placed, failed = clone_paste(player, offer, as_ghost)
+    storage.builds[id] = {placed = placed, label = offer.label, ghost = as_ghost}
+    local summary = string.format("Copied %d %s to (%d, %d)", #placed,
+      as_ghost and "ghosts" or "entities", offer.dest.x, offer.dest.y)
+    if failed > 0 then summary = summary .. string.format(", %d failed", failed) end
+    if as_ghost and #placed > 0 then summary = summary .. ". Your robots will build them." end
+    add_line(player, "[color=150,220,150]" .. summary .. "[/color]")
+    if row and row.valid then
+      set_offer_state(row, true)
+      if not row["llm_scout_undo"] then
+        local undo = row.add{type = "button", name = "llm_scout_undo",
+          caption = string.format("Undo  (%d)", #placed),
+          tooltip = "Removes exactly what was just placed, then re-enables the buttons.",
+          style = "red_button"}
+        pcall(function() undo.style.height = 28 undo.style.font = "default-small" end)
+        undo.tags = {llm_scout_undo = true, offer = id}
+      end
+    end
+    return
+  end
+
+  local created, failed, blocked = {}, 0, 0
+  for _, spec in pairs(offer.entities) do
+    if #created >= MAX_BUILD_ENTITIES then break end
+    local dir = direction_value(spec.direction)
+
+    local clear = true
+    pcall(function()
+      clear = player.surface.can_place_entity{
+        name = spec.name, position = {x = spec.x, y = spec.y},
+        direction = dir, force = player.force}
+    end)
+    if not clear then blocked = blocked + 1 end
+
+    local args
+    if as_ghost then
+      args = {name = "entity-ghost", inner_name = spec.name,
+              position = {x = spec.x, y = spec.y}, force = player.force,
+              raise_built = true, recipe = spec.recipe}
+    else
+      args = {name = spec.name, position = {x = spec.x, y = spec.y},
+              force = player.force, raise_built = true}
+    end
+    if dir then args.direction = dir end
+
+    local ok, entity = pcall(function() return player.surface.create_entity(args) end)
+    if ok and entity and entity.valid then
+      if spec.recipe and not as_ghost then
+        pcall(function() entity.set_recipe(spec.recipe) end)
+      end
+      created[#created + 1] = {ref = entity, name = spec.name, x = spec.x, y = spec.y}
+    else
+      failed = failed + 1
+    end
+  end
+
+  storage.builds[id] = {placed = created, label = offer.label, ghost = as_ghost}
+
+  local what = as_ghost and "ghosts" or "entities"
+  local summary = string.format("Placed %d of %d %s", #created, #offer.entities, what)
+  if failed > 0 then summary = summary .. string.format(", %d failed", failed) end
+  if blocked > 0 then summary = summary .. string.format(", %d on occupied ground", blocked) end
+  if as_ghost and #created > 0 then summary = summary .. ". Your robots will build them." end
+  add_line(player, "[color=150,220,150]" .. summary .. "[/color]")
+
+  if row and row.valid then
+    set_offer_state(row, true)
+    if not row["llm_scout_undo"] then
+      local undo = row.add{
+        type = "button", name = "llm_scout_undo",
+        caption = string.format("Undo  (%d)", #created),
+        tooltip = "Removes exactly what was just placed, then re-enables the buttons.",
+        style = "red_button",
+      }
+      pcall(function() undo.style.height = 28 undo.style.font = "default-small" end)
+      undo.tags = {llm_scout_undo = true, offer = id}
+    end
+  end
+end
+
+local function undo_build(player, id, row)
+  local record = storage.builds[id]
+  if not record then return end
+
+  local removed, built_since, gone = 0, 0, 0
+  for _, item in pairs(record.placed) do
+    if item.ref and item.ref.valid then
+      if pcall(function() item.ref.destroy{raise_destroy = true} end) then
+        removed = removed + 1
+      else
+        gone = gone + 1
+      end
+    else
+      -- A ghost the robots already turned real: match back on exact name and
+      -- position so nothing else can be caught by accident.
+      local found = nil
+      pcall(function()
+        local hits = player.surface.find_entities_filtered{
+          name = item.name, position = {x = item.x, y = item.y}, force = player.force, limit = 1}
+        found = hits and hits[1]
+      end)
+      if found and found.valid and pcall(function() found.destroy{raise_destroy = true} end) then
+        built_since = built_since + 1
+      else
+        gone = gone + 1
+      end
+    end
+  end
+  storage.builds[id] = nil
+
+  local summary = string.format("Removed %d", removed + built_since)
+  if built_since > 0 then
+    summary = summary .. string.format(" (%d your robots had already built)", built_since)
+  end
+  if gone > 0 then summary = summary .. string.format(", %d were already gone", gone) end
+  add_line(player, "[color=220,180,150]" .. summary .. "[/color]")
+
+  if row and row.valid then
+    local undo = row["llm_scout_undo"]
+    if undo and undo.valid then undo.destroy() end
+    set_offer_state(row, false)
+  end
+end
+
 local PENDING_TIMEOUT_TICKS = 60 * 180
 
 script.on_nth_tick(30, function()
@@ -284,6 +525,14 @@ script.on_event(defines.events.on_gui_click, function(e)
   local player = game.get_player(e.player_index)
 
   local tags = el.tags
+  if tags and tags.llm_scout_build then
+    execute_build(player, tags.offer, el.parent, tags.ghost == true)
+    return
+  end
+  if tags and tags.llm_scout_undo then
+    undo_build(player, tags.offer, el.parent)
+    return
+  end
   if tags and tags.llm_scout_goto then
     -- 2.0 removed LuaPlayer.open_map and zoom_to_world; the remote controller
     -- is the replacement. Report failures rather than swallowing them.
@@ -441,6 +690,56 @@ remote.add_interface("llm_scout", {
     local d = from_json(js) or {}
     local player = game.get_player(d.player_index or 1)
     if player then submit(player, d.question) end
+  end,
+
+  -- Build specs arrive chunked because an RCON command has a size budget.
+  build_offer = function(js)
+    local d = from_json(js)
+    if not d or not d.id then return end
+    local parts = storage.offer_parts[d.id] or {}
+    parts[d.seq] = d.part
+    storage.offer_parts[d.id] = parts
+
+    for i = 1, d.total do
+      if parts[i] == nil then return end
+    end
+
+    local joined = table.concat(parts, "", 1, d.total)
+    storage.offer_parts[d.id] = nil
+    local spec = from_json(joined)
+    if not spec or not spec.entities then return end
+
+    storage.offers[d.id] = {
+      label = spec.label or "build",
+      entities = spec.entities,
+      player_index = d.player_index or 1,
+    }
+    local player = game.get_player(d.player_index or 1)
+    if player then render_offer(player, d.id) end
+  end,
+
+  clone_offer = function(js)
+    local d = from_json(js)
+    if not d or not d.id then return end
+    local player = game.get_player(d.player_index or 1)
+    if not player then return end
+
+    local x1, y1 = math.min(d.x1, d.x2), math.min(d.y1, d.y2)
+    local x2, y2 = math.max(d.x1, d.x2), math.max(d.y1, d.y2)
+    local offer = {
+      kind = "clone",
+      label = d.label or "copy",
+      area = {{x1, y1}, {x2, y2}},
+      dest = {x = d.dx, y = d.dy},
+      player_index = d.player_index or 1,
+    }
+    offer.count = clone_count(player, offer)
+    if offer.count == 0 then
+      add_line(player, "[color=255,120,120]Nothing to copy in that area.[/color]")
+      return
+    end
+    storage.offers[d.id] = offer
+    render_offer(player, d.id)
   end,
 
   ping = function(js)

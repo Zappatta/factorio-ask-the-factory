@@ -26,6 +26,16 @@ MAX_RCON_BODY = 3500
 FLUSH_CHARS = 60
 FLUSH_SECONDS = 0.20
 PING_RE = re.compile(r"\[\[ping:\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*(?:\|([^\]]*))?\]\]")
+BUILD_RE = re.compile(r"\[\[build:([^\n\]]*)\n(.*?)\]\]", re.DOTALL)
+CLONE_RE = re.compile(
+    r"\[\[clone:([^\n\]]*)\n"
+    r"\s*from:\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)"
+    r"\s+(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*\n"
+    r"\s*to:\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*\n?"
+    r"\s*\]\]", re.IGNORECASE)
+MAX_BUILD_ENTITIES = 300
+DIRECTIONS = {"north", "northeast", "east", "southeast",
+              "south", "southwest", "west", "northwest"}
 COMPACT_BACKENDS = {"ollama", "openai-compatible"}
 
 log = logging.getLogger("llm-scout")
@@ -113,6 +123,38 @@ class Bridge:
                           (match.group(3) or "LLM Scout").strip()))
             return ""
 
+        builds = []
+
+        def take_build(match):
+            spec, errors = self.parse_build(match.group(1), match.group(2))
+            if errors:
+                log.warning("build spec issues: %s", "; ".join(errors))
+            if spec["entities"]:
+                builds.append(spec)
+            return ""
+
+        clones = []
+
+        def take_clone(match):
+            label, x1, y1, x2, y2, dx, dy = match.groups()
+            clones.append({
+                "label": label.strip() or "copy",
+                "x1": float(x1), "y1": float(y1), "x2": float(x2), "y2": float(y2),
+                "dx": float(dx), "dy": float(dy),
+            })
+            return ""
+
+        buffer = CLONE_RE.sub(take_clone, buffer)
+        for spec in clones:
+            log.info("clone offer: %s  (%s,%s)-(%s,%s) -> (%s,%s)", spec["label"],
+                     spec["x1"], spec["y1"], spec["x2"], spec["y2"], spec["dx"], spec["dy"])
+            self.call_mod("clone_offer", dict(spec, id=req_id, player_index=player_index))
+
+        buffer = BUILD_RE.sub(take_build, buffer)
+        for spec in builds:
+            log.info("build offer: %s (%d entities)", spec["label"], len(spec["entities"]))
+            self.send_build(req_id, player_index, spec)
+
         buffer = PING_RE.sub(take, buffer)
         for x, y, label in pings:
             log.info("ping %s,%s %s", x, y, label)
@@ -130,6 +172,47 @@ class Bridge:
         return buffer, ""
 
     # ---- request handling -----------------------------------------------
+
+    @staticmethod
+    def parse_build(label: str, body: str):
+        """One entity per line: name, x, y[, direction][, recipe]."""
+        entities, errors = [], []
+        for lineno, raw in enumerate(body.strip().splitlines(), 1):
+            line = raw.strip().lstrip("-").strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) < 3:
+                errors.append(f"line {lineno}: need at least name, x, y")
+                continue
+            spec = {"name": parts[0]}
+            try:
+                spec["x"], spec["y"] = float(parts[1]), float(parts[2])
+            except ValueError:
+                errors.append(f"line {lineno}: x and y must be numbers")
+                continue
+            for extra in parts[3:]:
+                if not extra:
+                    continue
+                if extra.lower() in DIRECTIONS:
+                    spec["direction"] = extra.lower()
+                else:
+                    spec["recipe"] = extra
+            entities.append(spec)
+            if len(entities) >= MAX_BUILD_ENTITIES:
+                errors.append(f"truncated at {MAX_BUILD_ENTITIES} entities")
+                break
+        return {"label": label.strip() or "build", "entities": entities}, errors
+
+    def send_build(self, req_id: int, player_index: int, spec: dict):
+        body = json.dumps(spec, ensure_ascii=True, separators=(",", ":"))
+        budget = 900
+        parts = [body[i:i + budget] for i in range(0, len(body), budget)]
+        for seq, part in enumerate(parts, 1):
+            self.call_mod("build_offer", {
+                "id": req_id, "player_index": player_index,
+                "seq": seq, "total": len(parts), "part": part,
+            })
 
     def effective_tier(self) -> str:
         if self.tier_setting != "auto":
@@ -162,12 +245,13 @@ class Bridge:
         messages = self.build_messages(req)
         cfg = self.cfg.get(backend, {})
 
-        buffer, emitted, pings = "", [], []
+        buffer, emitted, pings, raw_chunks = "", [], [], []
         pending, last_flush = "", time.time()
         started = time.time()
 
         try:
             for chunk in providers.stream(backend, cfg, SYSTEM, messages):
+                raw_chunks.append(chunk)
                 buffer += chunk
                 ready, buffer = self.drain(buffer, req_id, player_index, final=False,
                                            collected=pings)
@@ -197,6 +281,19 @@ class Bridge:
             log.exception("unexpected failure")
             self.send_error(req_id, f"bridge error: {exc}")
             return
+
+        raw = "".join(raw_chunks)
+        try:
+            log_dir = Path(__file__).parent / "logs"
+            log_dir.mkdir(exist_ok=True)
+            (log_dir / "last_answer.txt").write_text(raw, encoding="utf-8")
+            with open(log_dir / "answers.log", "a", encoding="utf-8") as fh:
+                fh.write(f"\n{'=' * 70}\nq#{req_id} [{backend}] {question}\n{'-' * 70}\n{raw}\n")
+        except OSError as exc:
+            log.warning("could not write answer log: %s", exc)
+        if "[[" in raw and "[[" in "".join(emitted):
+            log.warning("a [[...]] marker survived into the displayed text - "
+                        "see bridge/logs/last_answer.txt")
 
         answer = "".join(emitted).strip()
         key = req.get("player_index", 0)
