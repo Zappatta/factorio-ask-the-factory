@@ -44,8 +44,8 @@ already connected. In game press **Ctrl+Shift+L**.
 **Stop** shuts it down cleanly and writes a final save. **Export session…** copies your
 progress back to your normal saves folder.
 
-Needs Python 3 on PATH. There's a headless `python3 launcher.py` if you'd rather not use
-the GUI.
+Needs Python 3 on PATH, because the bridge daemon is still Python. Porting it to Rust so
+the launcher is a single self-contained binary is the plan.
 
 ## Models
 

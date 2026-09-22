@@ -128,6 +128,8 @@ python3 bridge/bridge.py --verbose                  # bridge alone, chatty
 ./launcher-gui/target/release/llmscout-launcher --check
 ```
 
+The launcher starts the bridge itself, so running it by hand is only for debugging.
+
 `bridge/logs/answers.log` records every raw model response **before** marker stripping.
 First place to look when something the model emitted did not take effect.
 
@@ -163,8 +165,6 @@ bridge/
   logs/             raw model answers (generated)
 config.toml
 launcher-gui/       Rust + egui launcher
-launcher.py         headless equivalent — duplicates the GUI's launch sequence and can
-                    drift; change both
 serverdata/         server write-data (generated)
 ```
 
@@ -236,3 +236,20 @@ The 0.36 release reworked the app API from what most examples still show:
   `::left`, `::right`
 - panels and `CentralPanel` take `&mut Ui`, not `&Context`; reach the context with
   `ui.ctx()`
+
+## Planned: one binary
+
+The end state is a single downloadable executable per platform, with no runtime
+dependencies — users should not need Python or Rust installed.
+
+That means porting the bridge from Python to Rust: RCON already exists there, marker
+parsing is a direct translation, and the providers need one blocking HTTP client (`ureq`
+rather than an async runtime, since the bridge runs on its own thread). Roughly 700-900
+lines of largely mechanical work.
+
+Alongside it, embedding the Lua mod with `include_dir!` and the prompt with `include_str!`
+so nothing has to sit beside the binary. A `prompt.txt` next to the executable would
+override the embedded copy, keeping prompt iteration fast without a rebuild.
+
+Worth doing once placing has settled — porting while the markers and prompt are still
+changing weekly means rewriting the same Rust repeatedly.
