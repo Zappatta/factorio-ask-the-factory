@@ -9,17 +9,7 @@ It reads your actual save — production rates, power, machine status, research,
 answers with real numbers, with clickable buttons that jump your map to the place it's
 talking about.
 
-```
-> why is my uranium backed up?
-
-Uranium chain is stalled, not starved - the choke point is downstream of mining.
-- 22 drills all waiting_for_space_in_destination
-- 18 centrifuges all full_output
-- uranium-238: 66/hr made vs 1,476/hr used
-No uranium train stop in your station list, so product is piling up locally.
-
-  [ uranium mine (-112, 392) ]   [ centrifuges (-87, 400) ]
-```
+![The chat window, diagnosing a stalled production line](docs/img/chat.png)
 
 ## Why it runs a local server
 
