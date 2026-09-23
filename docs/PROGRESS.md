@@ -68,7 +68,10 @@ chain-walking already works with the data it now has before adding more prompt.
 
 ### 6. Release CI
 
-Build mac / windows / linux binaries on tag. Only matters when handing it to someone else.
+`.github/workflows/release.yml` builds linux x86_64, macOS arm64 + x86_64 and windows
+x86_64 archives plus the mod zip on a `v*` tag and attaches them to a GitHub release. The
+tag must match both `Cargo.toml` and `mod/info.json` versions. No tests run in CI yet.
+Binaries are unsigned; no installers.
 
 ## Ideas not committed to
 

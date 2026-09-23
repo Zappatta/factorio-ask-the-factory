@@ -1,0 +1,117 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu, archive: tar.gz }
+          - { os: macos-latest, target: aarch64-apple-darwin, archive: tar.gz }
+          - { os: macos-latest, target: x86_64-apple-darwin, archive: tar.gz }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, archive: zip }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check tag matches versions
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          crate=$(grep -m1 '^version' launcher-gui/Cargo.toml | cut -d'"' -f2)
+          mod=$(jq -r .version mod/info.json)
+          [ "v$crate" = "$GITHUB_REF_NAME" ] || { echo "tag $GITHUB_REF_NAME != Cargo.toml v$crate"; exit 1; }
+          [ "v$mod" = "$GITHUB_REF_NAME" ] || { echo "tag $GITHUB_REF_NAME != mod/info.json v$mod"; exit 1; }
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: launcher-gui
+          key: ${{ matrix.target }}
+
+      - name: Build
+        working-directory: launcher-gui
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package
+        run: |
+          version=$(grep -m1 '^version' launcher-gui/Cargo.toml | cut -d'"' -f2)
+          name="ask-the-factory-$version-${{ matrix.target }}"
+          exe=ask-the-factory
+          [ "${{ runner.os }}" = "Windows" ] && exe=ask-the-factory.exe
+
+          # The launcher finds its project root by looking for config.toml and mod/
+          # beside the executable, so ship them together.
+          mkdir -p "dist/$name"
+          cp "launcher-gui/target/${{ matrix.target }}/release/$exe" "dist/$name/"
+          cp -r mod config.toml server-settings.json README.md "dist/$name/"
+
+          cd dist
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            7z a -tzip "$name.zip" "$name" > /dev/null
+          else
+            tar czf "$name.tar.gz" "$name"
+          fi
+          echo "ASSET=dist/$name.${{ matrix.archive }}" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: ${{ env.ASSET }}
+          if-no-files-found: error
+
+  mod:
+    name: Package mod
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Zip mod
+        # Factorio expects <name>_<version>.zip containing a <name>_<version>/ folder.
+        run: |
+          name=$(jq -r .name mod/info.json)_$(jq -r .version mod/info.json)
+          mkdir -p dist
+          cp -r mod "dist/$name"
+          (cd dist && zip -qr "$name.zip" "$name")
+          echo "ASSET=dist/$name.zip" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mod
+          path: ${{ env.ASSET }}
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: [build, mod]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes

@@ -25,6 +25,13 @@ session save.
 
 ## Getting started
 
+Grab the archive for your platform from
+[Releases](https://github.com/Zappatta/factorio-ask-the-factory/releases), unpack it, and
+run `ask-the-factory` from the unpacked folder. It needs `config.toml` and `mod/` beside it.
+The macOS builds are unsigned: run `xattr -dr com.apple.quarantine <folder>` once.
+
+Or build from source:
+
 ```bash
 cd launcher-gui && cargo build --release
 ./launcher-gui/target/release/ask-the-factory
