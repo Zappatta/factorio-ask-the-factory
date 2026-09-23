@@ -46,21 +46,74 @@ A JSON snapshot accompanies every question. There are no tool round-trips — a 
 would be game → file → bridge → RCON → game, roughly a second each, so one hop with
 everything beats five hops on demand.
 
-- production rates per item and fluid, last minute and last hour, plus lifetime totals
+- production rates per item and fluid, last minute and last hour, plus lifetime totals,
+  ranked by `max(made, used)` so items nothing produces but everything consumes still rank
 - power: generation, consumption and installed capacity by prototype, load percent
 - machines grouped by recipe, with status histograms and spatial clusters (centroid + bbox)
+- per group, `short_on`: which ingredient the stalled machines are actually missing, and how
+  many of them lack it
+- per group, `fed_by` / `outputs_to` / `inserters`: what the inserters on that group touch,
+  which is what says belt-fed vs bot-fed without needing a focus point
+- `local_view`: every belt run, inserter, machine and chest in a 56×56 square around one point
 - research, pollution, alerts, trains with state histogram, station names, entity census
 - exact entity footprints read from the prototypes
 
-**Tiers.** `full` (~23 KB) for Claude, `compact` (~4 KB) for local models, `auto` picks by
-backend. Set in `config.toml`.
+**Tiers.** `full` for Claude, `compact` (~19 KB, no local view, no clusters) for local models,
+`auto` picks by backend. Set in `config.toml`.
 
-**Cost per question.** ~2k tokens of system prompt, ~6k of snapshot, plus the last 6 turns.
-History stores questions only — replaying prior snapshots would dwarf everything else.
+**Sizes**, measured on a 668-machine, 1,143-inserter base:
 
-**Not in the snapshot:** belts, inserters, chests, pipes. This is the single biggest
-limitation, and the reason composing layouts works badly. Adding a bounded local view is
-the planned next step.
+| Section | Bytes |
+|---|---|
+| machines | 16.6 K |
+| production | 9.7 K |
+| local_view | 2.1 K over empty ground, 7–11 K on a dense block |
+| everything else | ~4.5 K |
+| **full total** | **33 K sparse, 42 K worst case** |
+
+**Cost per question.** ~2.5k tokens of system prompt, ~9–11k of snapshot, plus the last 6
+turns. History stores questions only — replaying prior snapshots would dwarf everything else.
+
+### The local view
+
+Full tier only. A square `radius` (28) tiles either side of a focus point. The radius is
+deliberately small: real clusters span 15–33 tiles, and doubling it quadruples the token
+cost for ground nobody asked about.
+
+**Focus**, in priority order: coordinates in the question text (`(-412, 338)`, `[gps=…]`, or
+a bare pair where one side is signed — an unsigned bare pair is rejected so "6,000 plates"
+is not a map position); then `storage.last_focus[player.index]`, written by the goto button
+handler; then `player.position`. There is deliberately no matching on prototype names —
+players write "LDS" and "green circuits", not "low-density-structure".
+
+**Caps** are 30 machines, 60 inserters, 20 belt runs, 20 containers, nearest to centre
+first, with `shown` and `total` maps so the model can see what was cut. Belt runs rank by
+distance minus their length (bonus capped at 12 tiles): a side-loaded merge lane is
+legitimately a chain of one-tile runs, and without the bias those stubs filled the whole
+budget while the main bus two tiles further out fell off the end.
+
+**Rows carry diagnosis, not geometry.** Machines carry status, recipe and `short_on`.
+Inserters carry the edge — `from`/`to` — plus `src_items`, what is on the belt tile they
+reach into, which is the difference between "belt empty here" and "the belt is fine, the
+inserter is the wrong tier". Containers carry logistic mode and contents; a chest with no
+contents is just a name. Poles and pipes are excluded: nobody can act on them.
+
+**Two id spaces**, kept apart by JSON type. A `names` array is emitted once and every row's
+`name` is an integer index into it, because hyphenated prototype names tokenise badly and
+would otherwise repeat on every row. Entity references (`from`, `to`) are the string row ids
+`m1`, `i1`, `b1`, `c1` when the other end is listed, and a bare integer name index when it
+is not. String means "this exact thing, listed above"; number means "some entity of this
+prototype, outside the view".
+
+**Belt runs are merged along the belt graph, not by geometry.** Follow
+`belt_neighbours.outputs[1]` while the next belt has the same prototype, both are
+`belt_shape == "straight"`, and the successor has exactly one input. Corners, undergrounds,
+splitters, side-loads and tier changes all end a run — each of them is a place the contents
+can change. Merging by position instead glues parallel lanes into one fictional belt.
+
+**Cost.** The full collector went from 244 ms to 256 ms with all of this added: the local
+view is area-limited, and the whole-surface inserter sweep behind `fed_by`/`outputs_to` is
+~15 ms for 1,143 inserters.
 
 ## Markers
 
@@ -202,6 +255,24 @@ zero or does nothing, suspect a dead API before suspecting the data.
 
 - **An inserter's direction is the side it takes FROM, not where it drops.** The direction
   points at the source. `direction=north` picks up from the north, drops to the south.
+- `LuaEntity.get_recipe()` **raises** on labs and mining drills rather than returning nil.
+  Guard on `entity.type` before calling it. This was silently costing 254 swallowed pcalls
+  per snapshot until the collector started counting them.
+- Labs: there is no recipe. The packs the current research needs come from
+  `force.current_research.research_unit_ingredients`, which is `{name, amount}` with no
+  `type` field, unlike `LuaRecipe.ingredients`.
+- `LuaInventory.get_contents()` returns an **array** of `{name, count, quality}` in 2.0, not
+  a name → count map.
+- `defines.inventory.assembling_machine_input`, `furnace_source` and `lab_input` are all 2,
+  so one constant covers crafting machines, furnaces, labs and the rocket silo.
+- A `LuaTransportLine` off a belt entity covers that **one tile** (`line_length == 1`), not
+  the whole segment. Summing a run means walking the run.
+- `game.reload_script()` and `game.reload_mods()` both run without error on a headless
+  server but do **not** pick up edits to mod files on disk — the source is read once at
+  load. Mod changes need a real Stop → Resume. To test collector changes against a live
+  save without restarting, push the file over RCON in ~2.6 KB chunks into a `_G` table and
+  `load(table.concat(...))` it: globals persist between `/silent-command` calls and `load`
+  is available.
 - `create_entity` succeeds where `can_place_entity` returns false.
 - `build_blueprint` silently places nothing on ungenerated or uncharted ground — generate
   and chart the destination first.

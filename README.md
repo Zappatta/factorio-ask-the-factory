@@ -91,6 +91,11 @@ unbuilt instead of quietly rearranging your base.
 
 ## More
 
-[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — how it works, what the model sees, the
-markers it can emit, dev tools, and a pile of Factorio 2.0 API notes that cost real time to
-work out.
+- [`AGENTS.md`](AGENTS.md) — if you are a coding agent, read this first.
+
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — how it works, what the model sees, the
+  markers it can emit, dev tools, and a pile of Factorio 2.0 API notes that cost real time
+  to work out.
+- [`docs/PROGRESS.md`](docs/PROGRESS.md) — where it stands and what is next.
+- [`docs/BOOTSTRAP.md`](docs/BOOTSTRAP.md) — how it was built, what was tried and dropped,
+  and what the failures taught.

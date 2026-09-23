@@ -48,6 +48,7 @@ local function init_storage()
   storage.offers = storage.offers or {}
   storage.builds = storage.builds or {}
   storage.offer_parts = storage.offer_parts or {}
+  storage.last_focus = storage.last_focus or {}
 end
 
 local function bridge_alive()
@@ -195,7 +196,7 @@ local function submit(player, question)
   add_line(player, prompt)
   remember(player, prompt)
 
-  local ok, snap = pcall(snapshot.collect, player, storage.tier)
+  local ok, snap = pcall(snapshot.collect, player, storage.tier, question)
   if not ok then snap = {error = "snapshot failed: " .. tostring(snap)} end
 
   storage.pending[id] = {player_index = player.index, chars = 0, started = game.tick}
@@ -637,6 +638,10 @@ script.on_event(defines.events.on_gui_click, function(e)
     return
   end
   if tags and tags.llm_scout_goto then
+    -- Remembered as the focus point for the next snapshot's local view: the place the
+    -- player just looked at is a better guess than wherever their body is standing.
+    init_storage()
+    storage.last_focus[player.index] = {x = tags.x, y = tags.y, tick = game.tick}
     -- 2.0 removed LuaPlayer.open_map and zoom_to_world; the remote controller
     -- is the replacement. Report failures rather than swallowing them.
     local ok, err = pcall(function()
@@ -739,7 +744,7 @@ remote.add_interface("llm_scout", {
     local d = from_json(js) or {}
     local player = game.get_player(d.player_index or 1)
     if not player then rcon.print("ERROR: no player") return end
-    local ok, r = pcall(snapshot.collect, player, d.tier or "full")
+    local ok, r = pcall(snapshot.collect, player, d.tier or "full", d.question)
     if not ok then rcon.print("ERROR: " .. tostring(r)) return end
     local encoded, j = pcall(to_json, r)
     if not encoded then rcon.print("ERROR encoding: " .. tostring(j)) return end
@@ -761,6 +766,27 @@ remote.add_interface("llm_scout", {
     rcon.print("alerts=" .. to_json(r.alerts.counts))
     if r.production.items[1] then rcon.print("top_item=" .. to_json(r.production.items[1])) end
     if r.machines.groups[1] then rcon.print("top_group=" .. to_json(r.machines.groups[1])) end
+    rcon.print("errors=" .. to_json(r.meta.collector_errors or {}))
+    if r.local_view then
+      local lv = r.local_view
+      rcon.print("local_view centre=" .. lv.centre.x .. "," .. lv.centre.y ..
+                 " r=" .. tostring(lv.radius) .. " via " .. tostring(lv.focused_on))
+      rcon.print("  shown=" .. to_json(lv.shown or {}) .. " total=" .. to_json(lv.total or {}))
+      if lv.machines and lv.machines[1] then rcon.print("  m1=" .. to_json(lv.machines[1])) end
+      if lv.inserters and lv.inserters[1] then rcon.print("  i1=" .. to_json(lv.inserters[1])) end
+      if lv.belt_runs and lv.belt_runs[1] then rcon.print("  b1=" .. to_json(lv.belt_runs[1])) end
+      if lv.containers and lv.containers[1] then rcon.print("  c1=" .. to_json(lv.containers[1])) end
+      if lv.error then rcon.print("  ERROR=" .. tostring(lv.error)) end
+    end
+    if d.sizes then
+      local parts = {}
+      for k, v in pairs(r) do
+        local okk, enc = pcall(to_json, v)
+        parts[#parts + 1] = k .. "=" .. (okk and #enc or -1)
+      end
+      table.sort(parts)
+      rcon.print("sizes " .. table.concat(parts, " "))
+    end
     if d.dump then rcon.print(j) end
   end,
 
