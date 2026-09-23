@@ -1,7 +1,7 @@
 # Architecture
 
-How LLM Scout fits together, what the model sees, and the Factorio 2.0 details that are
-easy to get wrong.
+How Ask the Factory fits together, what the model sees, and the Factorio 2.0 details
+that are easy to get wrong.
 
 ## Overview
 
@@ -177,9 +177,9 @@ session, so conversation history is replayed manually by the bridge.
 ### Tools
 
 ```bash
-llmscout-launcher --check                      # what it detected, no window
-llmscout-launcher --ask "why is my coal backed up?"
-llmscout-launcher --ask "..." --backend ollama --show-snapshot
+ask-the-factory --check                        # what it detected, no window
+ask-the-factory --ask "why is my coal backed up?"
+ask-the-factory --ask "..." --backend ollama --show-snapshot
 ```
 
 `--ask` talks to a running session over RCON and prints to stdout, which is the quickest

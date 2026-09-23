@@ -97,6 +97,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "175571dd1d178ced59193a6fc02dde1b972eb0bc56c892cde9beeceac5bf0f6b"
 
 [[package]]
+name = "ask-the-factory"
+version = "0.1.0"
+dependencies = [
+ "eframe",
+ "egui",
+ "regex",
+ "rfd",
+ "serde",
+ "serde_json",
+ "toml",
+ "ureq",
+]
+
+[[package]]
 name = "atomic-waker"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1147,20 +1161,6 @@ name = "litrs"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
-
-[[package]]
-name = "llmscout-launcher"
-version = "0.1.0"
-dependencies = [
- "eframe",
- "egui",
- "regex",
- "rfd",
- "serde",
- "serde_json",
- "toml",
- "ureq",
-]
 
 [[package]]
 name = "lock_api"

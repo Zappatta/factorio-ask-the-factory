@@ -95,7 +95,7 @@ local function ensure_top_button(player)
              tooltip = {"llm-scout.title"}, style = mod_gui.button_style}
   end)
   if not ok then
-    flow.add{type = "button", name = TOP_BUTTON, caption = "LLM", style = mod_gui.button_style}
+    flow.add{type = "button", name = TOP_BUTTON, caption = "Ask", style = mod_gui.button_style}
   end
 end
 
@@ -652,7 +652,7 @@ script.on_event(defines.events.on_gui_click, function(e)
       }
     end)
     if not ok then
-      player.print("[LLM Scout] could not open the map there: " .. tostring(err))
+      player.print("[Ask the Factory] could not open the map there: " .. tostring(err))
     end
     return
   end
@@ -915,7 +915,7 @@ remote.add_interface("llm_scout", {
     pcall(function()
       player.force.add_chart_tag(player.surface, {
         position = {x = d.x, y = d.y},
-        text = d.text or "LLM Scout",
+        text = d.text or "Ask the Factory",
       })
     end)
 

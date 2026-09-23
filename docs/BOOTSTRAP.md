@@ -103,6 +103,11 @@ probes are fine and are used throughout. Testing mod code means a restart; pay t
 
 ## Where it ended
 
+The working name throughout was **LLM Scout**; it became **Ask the Factory** afterwards.
+Only the user-facing strings moved. The mod id, the mod folder, the remote interface and
+the bus file still say `llm_scout`, because a save records which mods it was made with and
+renaming the mod would orphan every save already on disk.
+
 Eight commits. ~5,200 lines of Lua and Rust plus a 165-line prompt. The reading half is
 solid — it finds stalled production chains, power headroom and starved recipes with real
 numbers. The placing half works mechanically and is limited by the model's judgement rather

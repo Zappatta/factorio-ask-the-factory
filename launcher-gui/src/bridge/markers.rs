@@ -185,7 +185,7 @@ pub fn drain(buffer: &str, final_pass: bool) -> (String, Vec<Marker>, String, Ve
         markers.push(Marker::Ping {
             x: num(&caps[1]),
             y: num(&caps[2]),
-            label: label_or(caps.get(3).map(|m| m.as_str()), "LLM Scout"),
+            label: label_or(caps.get(3).map(|m| m.as_str()), "Ask the Factory"),
         });
     }
     text = ping_re().replace_all(&text, "").into_owned();
@@ -266,8 +266,8 @@ requester-chest, -182, -444, copper-plate:200
     #[test]
     fn blank_labels_fall_back_rather_than_reaching_the_player_empty() {
         let cases = [
-            ("[[ping:1,2|   ]]", "LLM Scout"),
-            ("[[ping:1,2]]", "LLM Scout"),
+            ("[[ping:1,2|   ]]", "Ask the Factory"),
+            ("[[ping:1,2]]", "Ask the Factory"),
             ("[[clone_like: 1,2 -> 3,4 |  ]]", "copy of this block"),
             ("[[clone_like: 1,2 -> 3,4]]", "copy of this block"),
             ("[[clone:   \nfrom: 1,2 3,4\nto: 5,6\n]]", "copy"),

@@ -1,6 +1,6 @@
 {
-  "name": "llm-scout local",
-  "description": "Local single-player session with RCON enabled for the LLM Scout bridge.",
+  "name": "ask-the-factory local",
+  "description": "Local single-player session with RCON enabled for the Ask the Factory bridge.",
   "tags": [],
   "max_players": 2,
   "visibility": { "public": false, "lan": true },

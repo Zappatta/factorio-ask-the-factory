@@ -179,7 +179,7 @@ impl App {
         let start = self.data_dir.clone().map(|d| d.join("saves")).unwrap_or_default();
         if let Some(dest) = rfd::FileDialog::new()
             .set_directory(start)
-            .set_file_name("llm-scout-export.zip")
+            .set_file_name("ask-the-factory-export.zip")
             .add_filter("Factorio save", &["zip"])
             .save_file()
         {
@@ -221,7 +221,7 @@ impl eframe::App for App {
         egui::Panel::top("header").show(ui, |ui| {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
-                ui.heading("LLM Scout");
+                ui.heading("Ask the Factory");
                 ui.add_space(10.0);
                 let (dot, tint) = if server_up {
                     ("running", egui::Color32::from_rgb(120, 200, 120))
@@ -519,8 +519,8 @@ fn main() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([780.0, 640.0])
             .with_min_inner_size([640.0, 440.0])
-            .with_title("LLM Scout"),
+            .with_title("Ask the Factory"),
         ..Default::default()
     };
-    eframe::run_native("LLM Scout", options, Box::new(|_cc| Ok(Box::new(App::new()))))
+    eframe::run_native("Ask the Factory", options, Box::new(|_cc| Ok(Box::new(App::new()))))
 }

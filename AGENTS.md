@@ -5,9 +5,9 @@ anything. Background is in [docs/](docs/); this file is what you must not get wr
 
 ## What this is
 
-A Factorio 2.0 mod (`mod/`, Lua) plus a launcher (`launcher-gui/`, Rust + egui) that runs a
-local Factorio server, bridges it to an LLM over RCON, and lets the player chat with it in
-game. One self-contained binary, no runtime dependencies.
+Ask the Factory: a Factorio 2.0 mod (`mod/`, Lua) plus a launcher (`launcher-gui/`, Rust +
+egui) that runs a local Factorio server, bridges it to an LLM over RCON, and lets the
+player chat with it in game. One self-contained binary, no runtime dependencies.
 
 ## Rules
 
@@ -24,6 +24,12 @@ There is no shortcut; do not invent one.
 **Changing the prompt requires nothing.** `launcher-gui/assets/prompt.txt` is embedded at
 build time, but a `prompt.txt` at the repo root overrides it and is re-read per question.
 Edit both when making a permanent change.
+
+**The internal name stays `llm_scout`.** The project is called Ask the Factory, but the mod
+id in `mod/info.json`, the mod folder `llm-scout_0.1.0`, the remote interface, the GUI
+element names and `llm_scout_bus.jsonl` keep the old name. A save records which mods it was
+made with, so renaming the mod orphans every save already on disk. Rename user-facing
+strings only.
 
 **Verify Factorio APIs against the running game before writing code against them.** Most
 wrong assumptions here were 1.1 habits that 2.0 changed. The ones already discovered are in

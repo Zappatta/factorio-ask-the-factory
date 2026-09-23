@@ -1,4 +1,6 @@
-# LLM Scout
+# Ask the Factory
+
+Your factory already knows what's wrong with it. This is how you ask.
 
 Ask an LLM about your Factorio base from inside the game. What you're producing, where it
 is, what's stalled, what to fix next.
@@ -35,7 +37,7 @@ session save.
 
 ```bash
 cd launcher-gui && cargo build --release
-./launcher-gui/target/release/llmscout-launcher
+./launcher-gui/target/release/ask-the-factory
 ```
 
 Pick a save, hit **Launch**. It sets up the server, starts everything, and opens Factorio
@@ -51,8 +53,8 @@ overrides it without a rebuild.
 To ask a one-off question from a terminal while a session is running:
 
 ```
-./launcher-gui/target/release/llmscout-launcher --ask "why is my coal backed up?"
-./launcher-gui/target/release/llmscout-launcher --ask "..." --show-snapshot
+./launcher-gui/target/release/ask-the-factory --ask "why is my coal backed up?"
+./launcher-gui/target/release/ask-the-factory --ask "..." --show-snapshot
 ```
 
 ## Models

@@ -752,7 +752,7 @@ mod tests {
 
     #[test]
     fn the_embedded_prompt_is_present() {
-        assert!(EMBEDDED_PROMPT.contains("LLM Scout"));
+        assert!(EMBEDDED_PROMPT.contains("Ask the Factory"));
         assert!(EMBEDDED_PROMPT.len() > 1000);
     }
 }
