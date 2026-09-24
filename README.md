@@ -88,6 +88,21 @@ produces something subtly wrong, because it can't see belts or inserters in the 
 Use **Place ghosts** while you're evaluating it. A bad suggestion then just sits there
 unbuilt instead of quietly rearranging your base.
 
+## Similar projects
+
+If this isn't quite what you want, these take a different approach to the same idea:
+
+- [factorio-sensei](https://github.com/alloc33/factorio-sensei) — a coach you ask with
+  `/sensei` in game chat or from a terminal. Attaches to a game you host yourself, looks up
+  what each question needs, and advises only. Anthropic API.
+- [AI Agent Bridge](https://github.com/bits-orio/ai-agent-bridge) — built for multiplayer
+  servers: `/ask` in chat, answers per team, cost caps and rate limits, and an open protocol
+  other mods can extend. Read-only. OpenRouter or the Anthropic API.
+
+Ask the Factory differs in running the server for you, answering in its own window with
+map buttons, working with a Claude Code login or a local model, and being able to place and
+copy things.
+
 ## More
 
 - [`AGENTS.md`](AGENTS.md) — if you are a coding agent, read this first.

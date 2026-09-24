@@ -49,7 +49,8 @@ committing.
 
 ### 3. Verify `local_view` earns its tokens
 
-It costs 2.7 K sparse and up to 11 K on a dense block. Watch whether answers actually
+It costs 2.7 K sparse and up to 11 K on a dense block. `answers.log` now records token
+usage per answer, so compare questions with and without it. Watch whether answers actually
 improve. If they do not, cut the radius or drop belt runs — the per-group `short_on` and
 feed summary are the cheap wins and they need no focus point at all.
 
@@ -82,6 +83,11 @@ Binaries are unsigned; no installers.
 - **Auto-scroll in the chat window.** Lost because `scroll_to_bottom()` blanks the pane.
   `scroll_to_element` might work.
 - **Multi-surface.** Everything assumes one surface. Space Age would need work.
+- **Quality, with Space Age.** `flow()` in `mod/snapshot.lua` calls `get_flow_count` without
+  a quality, which ai-agent-bridge reports counts normal quality only — so rare and legendary
+  output would vanish from production. Fix is a sum over `prototypes.quality`. Verified only
+  that the call accepts `quality` and matches the bare call on a save without Quality; the
+  undercount itself needs a Quality save to confirm.
 
 ## Housekeeping
 
