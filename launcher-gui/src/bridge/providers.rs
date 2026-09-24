@@ -54,8 +54,52 @@ pub type ChunkSink<'a> = &'a mut dyn FnMut(&str) -> bool;
 #[derive(Debug, Clone, PartialEq)]
 pub enum StreamStep {
     Text(String),
+    Usage(Usage),
     Done,
     Skip,
+}
+
+/// Token counts and cost as the backend reports them. Fields a backend does not
+/// report stay None, so a missing figure is never mistaken for zero.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Usage {
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub cache_read_tokens: Option<u64>,
+    pub cache_write_tokens: Option<u64>,
+    pub cost_usd: Option<f64>,
+}
+
+impl Usage {
+    /// Later reports win field by field: anthropic sends input counts at the start of
+    /// the stream and the cumulative output count at the end.
+    fn absorb(&mut self, later: Usage) {
+        self.input_tokens = later.input_tokens.or(self.input_tokens);
+        self.output_tokens = later.output_tokens.or(self.output_tokens);
+        self.cache_read_tokens = later.cache_read_tokens.or(self.cache_read_tokens);
+        self.cache_write_tokens = later.cache_write_tokens.or(self.cache_write_tokens);
+        self.cost_usd = later.cost_usd.or(self.cost_usd);
+    }
+
+    pub fn summary(&self) -> Option<String> {
+        let mut parts = Vec::new();
+        if let Some(n) = self.input_tokens {
+            parts.push(format!("in {n}"));
+        }
+        if let Some(n) = self.cache_read_tokens.filter(|n| *n > 0) {
+            parts.push(format!("cache read {n}"));
+        }
+        if let Some(n) = self.cache_write_tokens.filter(|n| *n > 0) {
+            parts.push(format!("cache write {n}"));
+        }
+        if let Some(n) = self.output_tokens {
+            parts.push(format!("out {n}"));
+        }
+        if let Some(cost) = self.cost_usd {
+            parts.push(format!("${cost:.4}"));
+        }
+        (!parts.is_empty()).then(|| parts.join(", "))
+    }
 }
 
 pub fn stream(
@@ -64,7 +108,7 @@ pub fn stream(
     system: &str,
     messages: &[Message],
     sink: ChunkSink,
-) -> Result<(), ProviderError> {
+) -> Result<Usage, ProviderError> {
     match backend {
         "claude-cli" => claude_cli(&cfg.claude_cli, system, messages, sink),
         "anthropic-api" => anthropic_api(&cfg.anthropic_api, system, messages, sink),
@@ -104,7 +148,7 @@ fn claude_cli(
     system: &str,
     messages: &[Message],
     sink: ChunkSink,
-) -> Result<(), ProviderError> {
+) -> Result<Usage, ProviderError> {
     let mut child = Command::new("claude")
         .args(["-p", "--output-format", "stream-json", "--include-partial-messages", "--verbose"])
         .arg("--model")
@@ -150,6 +194,7 @@ fn claude_cli(
 
     let stdout = child.stdout.take().expect("piped");
     let mut saw_text = false;
+    let mut usage = Usage::default();
     let mut aborted = false;
     let mut failure = None;
     for line in BufReader::new(stdout).lines().map_while(Result::ok) {
@@ -161,6 +206,7 @@ fn claude_cli(
                     break;
                 }
             }
+            Ok(StreamStep::Usage(reported)) => usage.absorb(reported),
             Ok(StreamStep::Done) => break,
             Ok(StreamStep::Skip) => {}
             Err(e) => {
@@ -182,7 +228,7 @@ fn claude_cli(
     }
     let status = status?;
     if aborted {
-        return Ok(());
+        return Ok(usage);
     }
     if !status.success() && !saw_text {
         let detail = diagnostics
@@ -194,7 +240,7 @@ fn claude_cli(
             status.code().unwrap_or(-1)
         )));
     }
-    Ok(())
+    Ok(usage)
 }
 
 fn wait_for(child: &mut Child, timeout: Duration) -> Result<std::process::ExitStatus, ProviderError> {
@@ -237,6 +283,16 @@ pub fn parse_claude_line(line: &str) -> Result<StreamStep, ProviderError> {
             .filter(|s| !s.is_empty())
             .unwrap_or("claude CLI reported an error")
             .to_string())),
+        Some("result") => {
+            let u = &evt["usage"];
+            Ok(StreamStep::Usage(Usage {
+                input_tokens: u["input_tokens"].as_u64(),
+                output_tokens: u["output_tokens"].as_u64(),
+                cache_read_tokens: u["cache_read_input_tokens"].as_u64(),
+                cache_write_tokens: u["cache_creation_input_tokens"].as_u64(),
+                cost_usd: evt["total_cost_usd"].as_f64(),
+            }))
+        }
         _ => Ok(StreamStep::Skip),
     }
 }
@@ -283,20 +339,22 @@ fn pump_lines(
     what: &str,
     sink: ChunkSink,
     parse: fn(&str) -> Result<StreamStep, ProviderError>,
-) -> Result<(), ProviderError> {
+) -> Result<Usage, ProviderError> {
+    let mut usage = Usage::default();
     for line in BufReader::new(reader).lines() {
         let line = line.map_err(|e| err(format!("{what} stream broke: {e}")))?;
         match parse(line.trim())? {
             StreamStep::Text(text) => {
                 if !sink(&text) {
-                    return Ok(());
+                    return Ok(usage);
                 }
             }
-            StreamStep::Done => return Ok(()),
+            StreamStep::Usage(reported) => usage.absorb(reported),
+            StreamStep::Done => return Ok(usage),
             StreamStep::Skip => {}
         }
     }
-    Ok(())
+    Ok(usage)
 }
 
 fn ollama(
@@ -304,7 +362,7 @@ fn ollama(
     system: &str,
     messages: &[Message],
     sink: ChunkSink,
-) -> Result<(), ProviderError> {
+) -> Result<Usage, ProviderError> {
     let host = cfg.host.trim_end_matches('/');
     let body = json!({
         "model": cfg.model,
@@ -331,7 +389,16 @@ pub fn parse_ollama_line(line: &str) -> Result<StreamStep, ProviderError> {
         return Ok(StreamStep::Text(chunk.to_string()));
     }
     if evt["done"].as_bool().unwrap_or(false) {
-        return Ok(StreamStep::Done);
+        // The final line carries the counts; the body closes right after it.
+        let usage = Usage {
+            input_tokens: evt["prompt_eval_count"].as_u64(),
+            output_tokens: evt["eval_count"].as_u64(),
+            ..Usage::default()
+        };
+        if usage == Usage::default() {
+            return Ok(StreamStep::Done);
+        }
+        return Ok(StreamStep::Usage(usage));
     }
     Ok(StreamStep::Skip)
 }
@@ -341,12 +408,13 @@ fn openai_compatible(
     system: &str,
     messages: &[Message],
     sink: ChunkSink,
-) -> Result<(), ProviderError> {
+) -> Result<Usage, ProviderError> {
     let base = cfg.base_url.trim_end_matches('/');
     let body = json!({
         "model": cfg.model,
         "messages": with_system(system, messages),
         "stream": true,
+        "stream_options": {"include_usage": true},
     });
     let bearer = format!("Bearer {}", cfg.api_key);
     let mut headers: Vec<(&str, &str)> = Vec::new();
@@ -380,10 +448,22 @@ pub fn parse_openai_line(line: &str) -> Result<StreamStep, ProviderError> {
         return Err(err(message.to_string()));
     }
     let chunk = evt["choices"][0]["delta"]["content"].as_str().unwrap_or("");
-    if chunk.is_empty() {
-        return Ok(StreamStep::Skip);
+    if !chunk.is_empty() {
+        return Ok(StreamStep::Text(chunk.to_string()));
     }
-    Ok(StreamStep::Text(chunk.to_string()))
+    // With include_usage the last chunk before [DONE] has empty choices and the
+    // counts. OpenRouter adds what it billed as usage.cost.
+    let u = &evt["usage"];
+    if u.is_object() {
+        return Ok(StreamStep::Usage(Usage {
+            input_tokens: u["prompt_tokens"].as_u64(),
+            output_tokens: u["completion_tokens"].as_u64(),
+            cache_read_tokens: u["prompt_tokens_details"]["cached_tokens"].as_u64(),
+            cache_write_tokens: None,
+            cost_usd: u["cost"].as_f64(),
+        }));
+    }
+    Ok(StreamStep::Skip)
 }
 
 fn anthropic_api(
@@ -391,7 +471,7 @@ fn anthropic_api(
     system: &str,
     messages: &[Message],
     sink: ChunkSink,
-) -> Result<(), ProviderError> {
+) -> Result<Usage, ProviderError> {
     let key = if cfg.api_key.is_empty() {
         std::env::var("ANTHROPIC_API_KEY").unwrap_or_default()
     } else {
@@ -405,7 +485,9 @@ fn anthropic_api(
     let body = json!({
         "model": cfg.model,
         "max_tokens": cfg.max_tokens,
-        "system": system,
+        // The system prompt is identical for every question, so it is the prefix worth
+        // caching. History is stored without its snapshots and never matches a prefix.
+        "system": [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
         "messages": messages,
         "stream": true,
     });
@@ -435,8 +517,20 @@ pub fn parse_anthropic_line(line: &str) -> Result<StreamStep, ProviderError> {
             .as_str()
             .unwrap_or("anthropic API reported an error")
             .to_string())),
+        Some("message_start") => Ok(StreamStep::Usage(anthropic_usage(&evt["message"]["usage"]))),
+        Some("message_delta") => Ok(StreamStep::Usage(anthropic_usage(&evt["usage"]))),
         Some("message_stop") => Ok(StreamStep::Done),
         _ => Ok(StreamStep::Skip),
+    }
+}
+
+fn anthropic_usage(u: &Value) -> Usage {
+    Usage {
+        input_tokens: u["input_tokens"].as_u64(),
+        output_tokens: u["output_tokens"].as_u64(),
+        cache_read_tokens: u["cache_read_input_tokens"].as_u64(),
+        cache_write_tokens: u["cache_creation_input_tokens"].as_u64(),
+        cost_usd: None,
     }
 }
 
@@ -471,9 +565,20 @@ mod tests {
 
         assert_eq!(parse_claude_line("not json at all").unwrap(), StreamStep::Skip);
         assert_eq!(parse_claude_line("").unwrap(), StreamStep::Skip);
+    }
+
+    #[test]
+    fn claude_cli_result_carries_usage_and_cost() {
+        let line = r#"{"type":"result","subtype":"success","is_error":false,"duration_ms":8123,"num_turns":1,"result":"Steel is starving your LDS line.","session_id":"4f1c","total_cost_usd":0.0412,"usage":{"input_tokens":3,"cache_creation_input_tokens":1840,"cache_read_input_tokens":14210,"output_tokens":296,"service_tier":"standard"}}"#;
         assert_eq!(
-            parse_claude_line(r#"{"type":"result","is_error":false,"result":"done"}"#).unwrap(),
-            StreamStep::Skip
+            parse_claude_line(line).unwrap(),
+            StreamStep::Usage(Usage {
+                input_tokens: Some(3),
+                output_tokens: Some(296),
+                cache_read_tokens: Some(14210),
+                cache_write_tokens: Some(1840),
+                cost_usd: Some(0.0412),
+            })
         );
     }
 
@@ -499,6 +604,14 @@ mod tests {
             parse_ollama_line(r#"{"message":{"content":""},"done":true}"#).unwrap(),
             StreamStep::Done
         );
+        assert_eq!(
+            parse_ollama_line(r#"{"model":"qwen3:14b","created_at":"2026-09-24T10:02:11Z","message":{"role":"assistant","content":""},"done_reason":"stop","done":true,"total_duration":9120000000,"prompt_eval_count":11873,"eval_count":244}"#).unwrap(),
+            StreamStep::Usage(Usage {
+                input_tokens: Some(11873),
+                output_tokens: Some(244),
+                ..Usage::default()
+            })
+        );
         assert_eq!(parse_ollama_line("").unwrap(), StreamStep::Skip);
         assert_eq!(
             parse_ollama_line(r#"{"error":"model 'nope' not found"}"#).unwrap_err(),
@@ -523,6 +636,17 @@ mod tests {
         assert_eq!(
             parse_openai_line(r#"data: {"choices":[{"delta":{"role":"assistant"}}]}"#).unwrap(),
             StreamStep::Skip
+        );
+        assert_eq!(
+            parse_openai_line(r#"data: {"id":"gen-1","choices":[],"usage":{"prompt_tokens":12040,"completion_tokens":311,"total_tokens":12351,"prompt_tokens_details":{"cached_tokens":4096},"cost":0.00218}}"#)
+                .unwrap(),
+            StreamStep::Usage(Usage {
+                input_tokens: Some(12040),
+                output_tokens: Some(311),
+                cache_read_tokens: Some(4096),
+                cache_write_tokens: None,
+                cost_usd: Some(0.00218),
+            })
         );
         assert_eq!(
             parse_openai_line(r#"data: {"error":{"message":"context length exceeded"}}"#)
@@ -559,5 +683,27 @@ mod tests {
             .unwrap_err(),
             ProviderError("Overloaded".into())
         );
+    }
+
+    #[test]
+    fn anthropic_usage_merges_start_and_final_delta() {
+        let start = r#"data: {"type":"message_start","message":{"id":"msg_01","type":"message","role":"assistant","content":[],"model":"claude-sonnet-5","stop_reason":null,"usage":{"input_tokens":11290,"cache_creation_input_tokens":0,"cache_read_input_tokens":5530,"output_tokens":1}}}"#;
+        let delta = r#"data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":287}}"#;
+        let mut usage = Usage::default();
+        for line in [start, delta] {
+            match parse_anthropic_line(line).unwrap() {
+                StreamStep::Usage(u) => usage.absorb(u),
+                other => panic!("expected usage, got {other:?}"),
+            }
+        }
+        assert_eq!(usage.input_tokens, Some(11290));
+        assert_eq!(usage.output_tokens, Some(287));
+        assert_eq!(usage.cache_read_tokens, Some(5530));
+        assert_eq!(usage.summary().unwrap(), "in 11290, cache read 5530, out 287");
+    }
+
+    #[test]
+    fn usage_summary_is_none_when_nothing_was_reported() {
+        assert_eq!(Usage::default().summary(), None);
     }
 }

@@ -485,11 +485,15 @@ impl Bridge {
             providers::stream(&backend, &cfg, &system, &messages, &mut sink)
         };
 
-        if let Err(ProviderError(reason)) = outcome {
-            self.error(&format!("provider failed: {reason}"));
-            self.send_error(id, &format!("{backend}: {reason}"));
-            return;
-        }
+        let usage = match outcome {
+            Ok(usage) => usage,
+            Err(ProviderError(reason)) => {
+                self.error(&format!("provider failed: {reason}"));
+                self.send_error(id, &format!("{backend}: {reason}"));
+                return;
+            }
+        };
+        let usage = usage.summary();
         if self.stopping() {
             self.warn(&format!("q#{} abandoned, bridge is stopping", ask.id_label()));
             return;
@@ -507,7 +511,7 @@ impl Bridge {
             self.call_mod("ping", ping);
         }
 
-        self.write_answer_log(&ask.id_label(), &backend, &question, &raw);
+        self.write_answer_log(&ask.id_label(), &backend, &question, &raw, usage.as_deref());
         if raw.contains("[[") && emitted.contains("[[") {
             self.warn(
                 "a [[...]] marker survived into the displayed text - see bridge/logs/last_answer.txt",
@@ -517,14 +521,15 @@ impl Bridge {
         let answer = emitted.trim().to_string();
         self.remember(ask.player_index.unwrap_or(0), &question, &answer);
         self.info(&format!(
-            "q#{} answered in {:.1}s ({} chars)",
+            "q#{} answered in {:.1}s ({} chars{})",
             ask.id_label(),
             started.elapsed().as_secs_f64(),
-            answer.chars().count()
+            answer.chars().count(),
+            usage.map(|u| format!("; {u}")).unwrap_or_default()
         ));
     }
 
-    fn write_answer_log(&self, id: &str, backend: &str, question: &str, raw: &str) {
+    fn write_answer_log(&self, id: &str, backend: &str, question: &str, raw: &str, usage: Option<&str>) {
         let dir = self.root.join("bridge").join("logs");
         let written = fs::create_dir_all(&dir)
             .and_then(|_| fs::write(dir.join("last_answer.txt"), raw))
@@ -535,7 +540,8 @@ impl Bridge {
                     .open(dir.join("answers.log"))?;
                 let rule = "=".repeat(70);
                 let dashes = "-".repeat(70);
-                write!(file, "\n{rule}\nq#{id} [{backend}] {question}\n{dashes}\n{raw}\n")
+                let usage = usage.map(|u| format!("usage: {u}\n")).unwrap_or_default();
+                write!(file, "\n{rule}\nq#{id} [{backend}] {question}\n{usage}{dashes}\n{raw}\n")
             });
         if let Err(e) = written {
             self.warn(&format!("could not write answer log: {e}"));
@@ -673,8 +679,11 @@ pub fn ask_once(
         let _ = std::io::stdout().flush();
         true
     };
-    providers::stream(&backend, cfg, &system, &messages, &mut sink).map_err(|e| e.0)?;
+    let usage = providers::stream(&backend, cfg, &system, &messages, &mut sink).map_err(|e| e.0)?;
     println!();
+    if let Some(usage) = usage.summary() {
+        eprintln!("\n[usage: {usage}]");
+    }
     Ok(())
 }
 
