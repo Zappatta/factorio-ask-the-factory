@@ -482,8 +482,28 @@ local function machines_section(collected, full)
     end
     out[#out + 1] = entry
   end
+
+  -- Groups past the cap still get one line each, or "where is X made" has no answer and
+  -- a short_on chain dead-ends at the first group that did not make the cut.
+  local shown = {}
+  for _, g in ipairs(kept) do shown[g] = true end
+  local others = {}
+  for _, g in ipairs(collected.order) do
+    if not shown[g] then
+      local entry = {produces = g.produces, machine_count = g.count, not_working = g.troubled}
+      if next(g.short_on) then entry.short_on = g.short_on end
+      if full and #g.positions > 0 then
+        local clusters = cluster_positions(g.positions)
+        entry.at = {clusters[1].x, clusters[1].y}
+        if #clusters > 1 then entry.clusters = #clusters end
+      end
+      others[#others + 1] = entry
+    end
+  end
+
   return {
     groups = out,
+    other_groups = #others > 0 and others or nil,
     total_machines = collected.total,
     status_totals = collected.status_totals,
     groups_shown = #out,
