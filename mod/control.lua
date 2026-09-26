@@ -87,6 +87,19 @@ local function add_line(player, text, color)
   return lbl
 end
 
+-- A replayed answer is one string; lay it out one label per CHUNK_CHARS like the live
+-- stream does, cutting only at newlines so a rich-text tag is never split.
+local function add_text(player, text, color)
+  local rest = text
+  while #rest > CHUNK_CHARS do
+    local cut = rest:sub(1, CHUNK_CHARS):match(".*()\n")
+    if not cut then break end
+    add_line(player, rest:sub(1, cut - 1), color)
+    rest = rest:sub(cut + 1)
+  end
+  return add_line(player, rest, color)
+end
+
 local function ensure_top_button(player)
   local flow = mod_gui.get_button_flow(player)
   if flow[TOP_BUTTON] then return end
@@ -103,6 +116,9 @@ local function close_window(player)
   local w = get_window(player)
   if w then w.destroy() end
 end
+
+-- Defined after the offer and pin renderers it dispatches to.
+local render_entry
 
 local function open_window(player)
   close_window(player)
@@ -158,8 +174,8 @@ local function open_window(player)
   row.add{type = "button", name = "llm_scout_send", caption = {"llm-scout.ask"},
           style = "green_button"}
 
-  for _, entry in pairs(storage.history[player.index] or {}) do
-    add_line(player, entry.text, entry.color)
+  for _, entry in ipairs(storage.history[player.index] or {}) do
+    render_entry(player, entry)
   end
 
   if not bridge_alive() then
@@ -173,11 +189,19 @@ local function toggle_window(player)
   if get_window(player) then close_window(player) else open_window(player) end
 end
 
-local function remember(player, text, color)
+-- History is what the window is rebuilt from on reopen, so anything that should survive
+-- closing it goes through here: text, separators, map-pin rows and build offers.
+local function remember(player, entry)
   local h = storage.history[player.index] or {}
-  h[#h + 1] = {text = text, color = color}
-  while #h > 60 do table.remove(h, 1) end
+  h[#h + 1] = entry
+  while #h > 100 do table.remove(h, 1) end
   storage.history[player.index] = h
+  return entry
+end
+
+local function say(player, text, color)
+  remember(player, {text = text, color = color})
+  return add_line(player, text, color)
 end
 
 local function submit(player, question)
@@ -188,13 +212,12 @@ local function submit(player, question)
   storage.pending[id] = nil
 
   local scroll = get_scroll(player)
-  if scroll and #scroll.children > 0 then
-    pcall(function() scroll.add{type = "line"} end)
+  if #(storage.history[player.index] or {}) > 0 then
+    remember(player, {line = true})
+    if scroll then pcall(function() scroll.add{type = "line"} end) end
   end
 
-  local prompt = "[color=120,190,255]" .. question .. "[/color]"
-  add_line(player, prompt)
-  remember(player, prompt)
+  say(player, "[color=120,190,255]" .. question .. "[/color]")
 
   local ok, snap = pcall(snapshot.collect, player, storage.tier, question)
   if not ok then snap = {error = "snapshot failed: " .. tostring(snap)} end
@@ -226,6 +249,11 @@ local function append_chunk(id, text)
   if not p then return end
   local player = game.get_player(p.player_index)
   if not player then return end
+
+  -- Kept in history as it streams, so closing the window mid-answer loses nothing.
+  if not p.entry then p.entry = remember(player, {text = ""}) end
+  p.entry.text = p.entry.text .. text
+
   local scroll = get_scroll(player)
   if not scroll then return end
 
@@ -408,6 +436,18 @@ local function set_offer_state(row, live)
   end
 end
 
+local function add_undo_button(row, id, count)
+  if row["llm_scout_undo"] then return end
+  local undo = row.add{
+    type = "button", name = "llm_scout_undo",
+    caption = string.format("Undo  (%d)", count),
+    tooltip = "Removes exactly what was just placed, then re-enables the buttons.",
+    style = "red_button",
+  }
+  pcall(function() undo.style.height = 28 undo.style.font = "default-small" end)
+  undo.tags = {llm_scout_undo = true, offer = id}
+end
+
 local function render_offer(player, id)
   local offer = storage.offers[id]
   if not offer then return end
@@ -438,6 +478,57 @@ local function render_offer(player, id)
   for _, b in pairs({place, ghosts}) do
     pcall(function() b.style.height = 28 b.style.font = "default-small" end)
   end
+
+  local build = storage.builds[id]
+  if build then
+    set_offer_state(row, true)
+    add_undo_button(row, id, #build.placed)
+  end
+end
+
+local function pins_row(scroll, id)
+  local name = "llm_scout_places_" .. tostring(id)
+  local row = scroll[name]
+  if not row then
+    row = scroll.add{type = "flow", name = name, direction = "horizontal"}
+    pcall(function() row.style.horizontal_spacing = 4 end)
+  end
+  return row
+end
+
+local function add_pin_button(row, pin)
+  local btn = row.add{
+    type = "button",
+    caption = string.format("%s  (%d, %d)", pin.text, pin.x, pin.y),
+    tooltip = "Show this on the map",
+  }
+  pcall(function()
+    btn.style.height = 26
+    btn.style.font = "default-small"
+    btn.style.padding = {0, 8, 0, 8}
+  end)
+  btn.tags = {llm_scout_goto = true, x = pin.x, y = pin.y}
+end
+
+render_entry = function(player, entry)
+  if entry.line then
+    local scroll = get_scroll(player)
+    if scroll then pcall(function() scroll.add{type = "line"} end) end
+  elseif entry.pins then
+    local scroll = get_scroll(player)
+    if not scroll then return end
+    local row = pins_row(scroll, entry.id)
+    for _, pin in ipairs(entry.pins) do add_pin_button(row, pin) end
+  elseif entry.offer then
+    render_offer(player, entry.offer)
+  else
+    add_text(player, entry.text, entry.color)
+  end
+end
+
+local function post(player, entry)
+  remember(player, entry)
+  render_entry(player, entry)
 end
 
 local function execute_build(player, id, row, as_ghost)
@@ -452,17 +543,10 @@ local function execute_build(player, id, row, as_ghost)
       as_ghost and "ghosts" or "entities", offer.dest.x, offer.dest.y)
     if failed > 0 then summary = summary .. string.format(", %d failed", failed) end
     if as_ghost and #placed > 0 then summary = summary .. ". Your robots will build them." end
-    add_line(player, "[color=150,220,150]" .. summary .. "[/color]")
+    say(player, "[color=150,220,150]" .. summary .. "[/color]")
     if row and row.valid then
       set_offer_state(row, true)
-      if not row["llm_scout_undo"] then
-        local undo = row.add{type = "button", name = "llm_scout_undo",
-          caption = string.format("Undo  (%d)", #placed),
-          tooltip = "Removes exactly what was just placed, then re-enables the buttons.",
-          style = "red_button"}
-        pcall(function() undo.style.height = 28 undo.style.font = "default-small" end)
-        undo.tags = {llm_scout_undo = true, offer = id}
-      end
+      add_undo_button(row, id, #placed)
     end
     return
   end
@@ -518,20 +602,11 @@ local function execute_build(player, id, row, as_ghost)
   if failed > 0 then summary = summary .. string.format(", %d failed", failed) end
   if blocked > 0 then summary = summary .. string.format(", %d on occupied ground", blocked) end
   if as_ghost and #created > 0 then summary = summary .. ". Your robots will build them." end
-  add_line(player, "[color=150,220,150]" .. summary .. "[/color]")
+  say(player, "[color=150,220,150]" .. summary .. "[/color]")
 
   if row and row.valid then
     set_offer_state(row, true)
-    if not row["llm_scout_undo"] then
-      local undo = row.add{
-        type = "button", name = "llm_scout_undo",
-        caption = string.format("Undo  (%d)", #created),
-        tooltip = "Removes exactly what was just placed, then re-enables the buttons.",
-        style = "red_button",
-      }
-      pcall(function() undo.style.height = 28 undo.style.font = "default-small" end)
-      undo.tags = {llm_scout_undo = true, offer = id}
-    end
+    add_undo_button(row, id, #created)
   end
 end
 
@@ -570,7 +645,7 @@ local function undo_build(player, id, row)
     summary = summary .. string.format(" (%d your robots had already built)", built_since)
   end
   if gone > 0 then summary = summary .. string.format(", %d were already gone", gone) end
-  add_line(player, "[color=220,180,150]" .. summary .. "[/color]")
+  say(player, "[color=220,180,150]" .. summary .. "[/color]")
 
   if row and row.valid then
     local undo = row["llm_scout_undo"]
@@ -727,16 +802,7 @@ remote.add_interface("llm_scout", {
     storage.bridge_tick = game.tick
     if d.text and d.text ~= "" then append_chunk(d.id, d.text) end
     if d.error then append_chunk(d.id, "\n[color=red]" .. d.error .. "[/color]") end
-    if d.final then
-      local p = storage.pending[d.id]
-      if p then
-        local player = game.get_player(p.player_index)
-        if player and p.label_ref and p.label_ref.valid then
-          remember(player, p.label_ref.caption)
-        end
-      end
-      storage.pending[d.id] = nil
-    end
+    if d.final then storage.pending[d.id] = nil end
   end,
 
   -- Diagnostics: runs the collector and reports shape over the RCON connection.
@@ -844,7 +910,7 @@ remote.add_interface("llm_scout", {
       player_index = d.player_index or 1,
     }
     local player = game.get_player(d.player_index or 1)
-    if player then render_offer(player, d.id) end
+    if player then post(player, {offer = d.id}) end
   end,
 
   -- The model points at one machine; we work out the block and clone that.
@@ -856,7 +922,7 @@ remote.add_interface("llm_scout", {
 
     local area, reached, seed = detect_block(player, d.x, d.y)
     if not area then
-      add_line(player, "[color=255,120,120]Found nothing to copy near (" ..
+      say(player, "[color=255,120,120]Found nothing to copy near (" ..
         math.floor(d.x) .. ", " .. math.floor(d.y) .. ").[/color]")
       return
     end
@@ -870,17 +936,17 @@ remote.add_interface("llm_scout", {
     }
     offer.count = clone_count(player, offer)
     if offer.count == 0 then
-      add_line(player, "[color=255,120,120]That block captured nothing.[/color]")
+      say(player, "[color=255,120,120]That block captured nothing.[/color]")
       return
     end
 
     storage.offers[d.id] = offer
-    add_line(player, string.format(
+    say(player, string.format(
       "[color=170,170,170]Block around %s at (%d, %d): %d linked entities, " ..
       "capturing %d in a %dx%d area.[/color]",
       seed.name, math.floor(seed.position.x), math.floor(seed.position.y), reached,
       offer.count, math.ceil(area[2][1] - area[1][1]), math.ceil(area[2][2] - area[1][2])))
-    render_offer(player, d.id)
+    post(player, {offer = d.id})
   end,
 
   clone_offer = function(js)
@@ -900,11 +966,11 @@ remote.add_interface("llm_scout", {
     }
     offer.count = clone_count(player, offer)
     if offer.count == 0 then
-      add_line(player, "[color=255,120,120]Nothing to copy in that area.[/color]")
+      say(player, "[color=255,120,120]Nothing to copy in that area.[/color]")
       return
     end
     storage.offers[d.id] = offer
-    render_offer(player, d.id)
+    post(player, {offer = d.id})
   end,
 
   ping = function(js)
@@ -921,26 +987,19 @@ remote.add_interface("llm_scout", {
 
     -- [gps=] rich text does not render inside GUI labels, so a location becomes
     -- a button that opens the map instead.
+    -- Group a request's locations into one row rather than a stack of wide buttons.
+    local id = d.id or 0
+    local pin = {text = d.text or "location", x = d.x, y = d.y}
+    local h = storage.history[player.index] or {}
+    local last = h[#h]
+    if last and last.pins and last.id == id then
+      last.pins[#last.pins + 1] = pin
+    else
+      remember(player, {pins = {pin}, id = id})
+    end
+
     local scroll = get_scroll(player)
     if not scroll then return end
-
-    -- Group a request's locations into one row rather than a stack of wide buttons.
-    local row_name = "llm_scout_places_" .. tostring(d.id or 0)
-    local row = scroll[row_name]
-    if not row then
-      row = scroll.add{type = "flow", name = row_name, direction = "horizontal"}
-      pcall(function() row.style.horizontal_spacing = 4 end)
-    end
-    local btn = row.add{
-      type = "button",
-      caption = string.format("%s  (%d, %d)", d.text or "location", d.x, d.y),
-      tooltip = "Show this on the map",
-    }
-    pcall(function()
-      btn.style.height = 26
-      btn.style.font = "default-small"
-      btn.style.padding = {0, 8, 0, 8}
-    end)
-    btn.tags = {llm_scout_goto = true, x = d.x, y = d.y}
+    add_pin_button(pins_row(scroll, id), pin)
   end,
 })
