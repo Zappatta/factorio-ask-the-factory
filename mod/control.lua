@@ -531,10 +531,11 @@ local function post(player, entry)
   render_entry(player, entry)
 end
 
+-- Returns what happened, for the MCP caller; the GUI path only needs the side effects.
 local function execute_build(player, id, row, as_ghost)
   local offer = storage.offers[id]
-  if not offer then return end
-  if storage.builds[id] then return end
+  if not offer then return {error = "no such offer"} end
+  if storage.builds[id] then return {error = "already placed - undo it first"} end
 
   if offer.kind == "clone" then
     local placed, failed = clone_paste(player, offer, as_ghost)
@@ -548,10 +549,16 @@ local function execute_build(player, id, row, as_ghost)
       set_offer_state(row, true)
       add_undo_button(row, id, #placed)
     end
-    return
+    return {build_id = id, summary = summary, placed = #placed, failed = failed}
   end
 
   local created, failed, blocked = {}, 0, 0
+  local problems = {}
+  local function problem(spec, why)
+    if #problems < 20 then
+      problems[#problems + 1] = {name = spec.name, x = spec.x, y = spec.y, problem = why}
+    end
+  end
   for _, spec in pairs(offer.entities) do
     if #created >= MAX_BUILD_ENTITIES then break end
     local dir = direction_value(spec.direction)
@@ -562,7 +569,10 @@ local function execute_build(player, id, row, as_ghost)
         name = spec.name, position = {x = spec.x, y = spec.y},
         direction = dir, force = player.force}
     end)
-    if not clear then blocked = blocked + 1 end
+    if not clear then
+      blocked = blocked + 1
+      problem(spec, "occupied ground")
+    end
 
     local args
     if as_ghost then
@@ -592,6 +602,7 @@ local function execute_build(player, id, row, as_ghost)
       created[#created + 1] = {ref = entity, name = spec.name, x = spec.x, y = spec.y}
     else
       failed = failed + 1
+      problem(spec, ok and "not created" or tostring(entity))
     end
   end
 
@@ -608,11 +619,13 @@ local function execute_build(player, id, row, as_ghost)
     set_offer_state(row, true)
     add_undo_button(row, id, #created)
   end
+  return {build_id = id, summary = summary, placed = #created, failed = failed,
+          blocked = blocked, problems = #problems > 0 and problems or nil}
 end
 
 local function undo_build(player, id, row)
   local record = storage.builds[id]
-  if not record then return end
+  if not record then return {error = "nothing to undo for " .. tostring(id)} end
 
   local removed, built_since, gone = 0, 0, 0
   for _, item in pairs(record.placed) do
@@ -652,6 +665,7 @@ local function undo_build(player, id, row)
     if undo and undo.valid then undo.destroy() end
     set_offer_state(row, false)
   end
+  return {summary = summary, removed = removed + built_since, already_gone = gone}
 end
 
 local PENDING_TIMEOUT_TICKS = 60 * 180
@@ -777,6 +791,186 @@ commands.add_command("llm", "Ask the LLM about your factory", function(cmd)
   local player = game.get_player(cmd.player_index)
   if player then submit(player, cmd.parameter) end
 end)
+
+-- ---------------------------------------------------------------------------
+-- MCP. The launcher's --mcp mode calls in here over RCON and reads the answer back from
+-- rcon.print, one JSON object per call. Placing happens immediately: the confirmation
+-- is the MCP client's own permission prompt, not a button in game.
+-- ---------------------------------------------------------------------------
+
+local MCP = {}
+
+local function mcp_player(d)
+  if d.player_index then return game.get_player(d.player_index) end
+  return game.connected_players[1] or game.get_player(1)
+end
+
+local function mcp_offer_id()
+  storage.mcp_seq = (storage.mcp_seq or 0) + 1
+  return "mcp-" .. storage.mcp_seq
+end
+
+local function half(n)
+  return math.floor(n * 2 + 0.5) / 2
+end
+
+-- Where a copy will land and how much is already there. Approximate: the paste snaps
+-- to the grid, and the captured area carries a margin that may overlap neighbours.
+local function destination_report(player, offer)
+  local w = offer.area[2][1] - offer.area[1][1]
+  local h = offer.area[2][2] - offer.area[1][2]
+  local rect = {{half(offer.dest.x - w / 2), half(offer.dest.y - h / 2)},
+                {half(offer.dest.x + w / 2), half(offer.dest.y + h / 2)}}
+  local n = player.surface.count_entities_filtered{area = rect, force = player.force}
+  return {area = rect, entities_already_there = n}
+end
+
+local function source_report(offer)
+  local a = offer.area
+  return {area = {{half(a[1][1]), half(a[1][2])}, {half(a[2][1]), half(a[2][2])}},
+          entities = offer.count}
+end
+
+local function copy(player, d, offer)
+  offer.count = clone_count(player, offer)
+  if offer.count == 0 then return {error = "that area captured nothing"} end
+  local report = {source = source_report(offer), destination = destination_report(player, offer)}
+  if d.preview then
+    report.preview = true
+    return report
+  end
+  local id = mcp_offer_id()
+  storage.offers[id] = offer
+  local result = execute_build(player, id, nil, d.ghosts == true)
+  for k, v in pairs(report) do result[k] = v end
+  if result.summary then player.print("[Ask the Factory] " .. result.summary) end
+  return result
+end
+
+function MCP.snapshot(player, d)
+  local focus = (d.x and d.y) and {x = d.x, y = d.y} or nil
+  return snapshot.collect(player, d.tier or "full", nil, focus)
+end
+
+function MCP.area(player, d)
+  return snapshot.area(player, d.x, d.y, d.radius)
+end
+
+function MCP.entity(player, d)
+  return snapshot.entity(player, d.x, d.y)
+end
+
+function MCP.item(player, d)
+  return snapshot.item(player, d.name)
+end
+
+function MCP.ping(player, d)
+  local tag = player.force.add_chart_tag(player.surface, {
+    position = {x = d.x, y = d.y}, text = d.label or "Ask the Factory"})
+  if not tag then return {error = "could not pin there - that part of the map is not charted"} end
+  return {pinned = {x = d.x, y = d.y, label = d.label}}
+end
+
+function MCP.place(player, d)
+  if type(d.entities) ~= "table" or #d.entities == 0 then return {error = "entities is empty"} end
+  if #d.entities > MAX_BUILD_ENTITIES then
+    return {error = "at most " .. MAX_BUILD_ENTITIES .. " entities per call"}
+  end
+  local id = mcp_offer_id()
+  storage.offers[id] = {label = d.label or "placed by Claude", entities = d.entities,
+                        player_index = player.index}
+  local result = execute_build(player, id, nil, d.ghosts == true)
+  if result.summary then player.print("[Ask the Factory] " .. result.summary) end
+  return result
+end
+
+function MCP.copy_block(player, d)
+  local area, reached, seed = detect_block(player, d.x, d.y)
+  if not area then
+    return {error = string.format("found nothing to copy near (%d, %d)", math.floor(d.x), math.floor(d.y))}
+  end
+  local result = copy(player, d, {
+    kind = "clone", label = d.label or ("copy of " .. seed.name), area = area,
+    dest = {x = d.dest_x, y = d.dest_y}, player_index = player.index,
+  })
+  result.seed = {name = seed.name, x = half(seed.position.x), y = half(seed.position.y),
+                 linked_entities = reached}
+  return result
+end
+
+function MCP.copy_area(player, d)
+  return copy(player, d, {
+    kind = "clone", label = d.label or "copy",
+    area = {{math.min(d.x1, d.x2), math.min(d.y1, d.y2)}, {math.max(d.x1, d.x2), math.max(d.y1, d.y2)}},
+    dest = {x = d.dest_x, y = d.dest_y}, player_index = player.index,
+  })
+end
+
+function MCP.undo(player, d)
+  -- Builds made from the chat window are keyed by number, MCP ones by string.
+  local id = d.build_id
+  if not storage.builds[id] and tonumber(id) then id = tonumber(id) end
+  local result = undo_build(player, id, nil)
+  if result.summary then player.print("[Ask the Factory] " .. result.summary) end
+  return result
+end
+
+local function item_stack(d)
+  if not (d.name and prototypes.item[d.name]) then return nil, "no item is called " .. tostring(d.name) end
+  local count = math.floor(tonumber(d.count) or 0)
+  if count < 1 then return nil, "count must be at least 1" end
+  local stack = {name = d.name, count = count}
+  if d.quality then
+    if not prototypes.quality[d.quality] then return nil, "no quality is called " .. tostring(d.quality) end
+    stack.quality = d.quality
+  end
+  return stack
+end
+
+function MCP.give(player, d)
+  local stack, err = item_stack(d)
+  if not stack then return {error = err} end
+  local given = player.insert(stack)
+  if given > 0 then player.print(string.format("[Ask the Factory] added %d %s", given, stack.name)) end
+  return {given = given, asked = stack.count, now_has = player.get_item_count(stack.name),
+          note = given < stack.count and "inventory full - the rest was not added" or nil}
+end
+
+function MCP.take(player, d)
+  local stack, err = item_stack(d)
+  if not stack then return {error = err} end
+  local removed = player.remove_item(stack)
+  if removed > 0 then player.print(string.format("[Ask the Factory] removed %d %s", removed, stack.name)) end
+  return {removed = removed, asked = stack.count, now_has = player.get_item_count(stack.name)}
+end
+
+function MCP.builds(player, d)
+  local out = {}
+  for id, b in pairs(storage.builds) do
+    out[#out + 1] = {build_id = tostring(id), label = b.label, entities = #b.placed, ghosts = b.ghost}
+  end
+  return {builds = out}
+end
+
+local function mcp_reply(t)
+  local ok, encoded = pcall(to_json, t)
+  if not ok then encoded = to_json{ok = false, error = "could not encode the result: " .. tostring(encoded)} end
+  rcon.print(encoded)
+end
+
+local function mcp_run(d)
+  local op = MCP[d.op or ""]
+  if not op then return mcp_reply{ok = false, error = "unknown op " .. tostring(d.op)} end
+  local player = mcp_player(d)
+  if not player then
+    return mcp_reply{ok = false, error = "no player on this save yet - join the server once"}
+  end
+  init_storage()
+  local ok, res = pcall(op, player, d.args or {})
+  if not ok then return mcp_reply{ok = false, error = tostring(res)} end
+  if res.error then return mcp_reply{ok = false, error = res.error} end
+  mcp_reply{ok = true, result = res}
+end
 
 remote.add_interface("llm_scout", {
   -- Bridge heartbeat plus the list of backends to show in the dropdown.
@@ -971,6 +1165,34 @@ remote.add_interface("llm_scout", {
     end
     storage.offers[d.id] = offer
     post(player, {offer = d.id})
+  end,
+
+  -- A request too big for one RCON command arrives as numbered parts first, then an
+  -- mcp call naming them.
+  mcp_part = function(js)
+    local d = from_json(js)
+    if not d or not d.key then return end
+    storage.mcp_parts = storage.mcp_parts or {}
+    local parts = storage.mcp_parts[d.key] or {}
+    parts[d.seq] = d.part
+    storage.mcp_parts[d.key] = parts
+  end,
+
+  mcp = function(js)
+    local d = from_json(js)
+    if d and d.staged then
+      storage.mcp_parts = storage.mcp_parts or {}
+      local parts = storage.mcp_parts[d.staged] or {}
+      storage.mcp_parts[d.staged] = nil
+      for i = 1, d.total or 0 do
+        if parts[i] == nil then
+          return mcp_reply{ok = false, error = "request part " .. i .. " of " .. d.total .. " never arrived"}
+        end
+      end
+      d = from_json(table.concat(parts, "", 1, d.total))
+    end
+    if not d then return mcp_reply{ok = false, error = "request is not valid JSON"} end
+    mcp_run(d)
   end,
 
   ping = function(js)

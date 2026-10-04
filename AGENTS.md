@@ -75,6 +75,7 @@ passes it and dies at runtime. That has shipped. Run the thing.
 | `mod/snapshot.lua` | state collection — what the model sees |
 | `launcher-gui/src/bridge/` | bus tailer, marker parsing, the four LLM backends |
 | `launcher-gui/src/session.rs` | server lifecycle; the bridge runs on a thread here |
+| `launcher-gui/src/mcp.rs` | `--mcp` stdio server; tools call the mod's `mcp` remote function |
 | `launcher-gui/assets/prompt.txt` | system prompt |
 | `bridge/logs/answers.log` | raw model output, pre-marker-stripping |
 

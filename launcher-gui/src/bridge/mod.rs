@@ -23,9 +23,9 @@ const BUS_FILE: &str = "llm_scout_bus.jsonl";
 const HEARTBEAT: Duration = Duration::from_secs(10);
 const FLUSH_INTERVAL: Duration = Duration::from_millis(200);
 const FLUSH_CHARS: usize = 60;
-const MAX_RCON_BODY: usize = 3500;
+pub(crate) const MAX_RCON_BODY: usize = 3500;
 const RCON_TEXT_BUDGET: usize = 1200;
-const OFFER_PART_BUDGET: usize = 900;
+pub(crate) const OFFER_PART_BUDGET: usize = 900;
 const COMPACT_BACKENDS: [&str; 2] = ["ollama", "openai-compatible"];
 const EMBEDDED_PROMPT: &str = include_str!("../../assets/prompt.txt");
 
@@ -40,7 +40,7 @@ pub struct BridgeOpts {
 
 /// Escapes a string for a Lua single-quoted literal. Backslash first, or the
 /// escapes we add below get escaped in turn.
-fn lua_quote(text: &str) -> String {
+pub(crate) fn lua_quote(text: &str) -> String {
     text.replace('\\', "\\\\")
         .replace('\'', "\\'")
         .replace('\n', "\\n")
@@ -67,12 +67,12 @@ fn escape_non_ascii(text: &str) -> String {
     out
 }
 
-fn compact_json(value: &Value) -> String {
+pub(crate) fn compact_json(value: &Value) -> String {
     escape_non_ascii(&value.to_string())
 }
 
 /// Chunks by characters so a piece never splits a multi-byte character.
-fn split_for_rcon(text: &str, budget: usize) -> Vec<String> {
+pub(crate) fn split_for_rcon(text: &str, budget: usize) -> Vec<String> {
     let mut parts = Vec::new();
     let mut piece = String::new();
     let mut count = 0;

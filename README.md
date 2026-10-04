@@ -54,6 +54,34 @@ To ask a one-off question from a terminal while a session is running:
 ./launcher-gui/target/release/ask-the-factory --ask "..." --show-snapshot
 ```
 
+## Using it from Claude Code — recommended
+
+**This is how I'd use it, personally.** The in-game window works, but a terminal is a
+much better place to talk about a factory: longer answers, real formatting, follow-up
+questions, and a model that can look things up as it goes instead of reasoning from one
+snapshot.
+
+It runs over MCP. Start a session from the launcher as usual, then register the server
+once, from the folder you unpacked:
+
+```
+claude mcp add ask-the-factory -- "$PWD/ask-the-factory" --mcp
+```
+
+If you built from source, the binary is at `launcher-gui/target/release/ask-the-factory`
+instead.
+
+Claude Code can then:
+
+- read the whole-map snapshot, or dig into one item, area or entity in detail
+- pin places on your map
+- copy an existing block, or place entities, with a preview of what is in the way first
+- undo exactly what it placed
+- add items to your inventory or take them out
+
+Changes go through Claude Code's own permission prompt instead of the in-game buttons, and
+each one prints a line in your game console so you can see what happened.
+
 ## Models
 
 Switchable from a dropdown while you play. Defaults to `claude-cli`, which uses your

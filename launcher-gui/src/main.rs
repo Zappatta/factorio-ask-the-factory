@@ -3,6 +3,7 @@
 mod bridge;
 mod config;
 mod factorio;
+mod mcp;
 mod rcon;
 mod session;
 
@@ -506,6 +507,13 @@ fn main() -> eframe::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "--check") {
         run_check();
+        return Ok(());
+    }
+    if args.iter().any(|a| a == "--mcp") {
+        if let Err(e) = mcp::run(&project_root()) {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
         return Ok(());
     }
     if args.iter().any(|a| a == "--ask") {

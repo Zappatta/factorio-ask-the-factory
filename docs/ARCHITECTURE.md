@@ -164,6 +164,36 @@ reads `content_block_delta` events. It runs with MCP servers, settings and tools
 per-question overhead from ~27k cache-creation tokens to ~3.7k. Each invocation is a fresh
 session, so conversation history is replayed manually by the bridge.
 
+## MCP mode
+
+`ask-the-factory --mcp` is a stdio MCP server for Claude Code or any other MCP client. It
+sits alongside the in-game chat and does not replace it. It does not start Factorio; it
+connects over RCON to a session the launcher started, and reconnects if that session is
+restarted.
+
+Every tool except `factory_guide` is one call to `remote.call('llm_scout','mcp', …)`, which
+answers with one `{ok, result | error}` line via `rcon.print`. A request too big for one
+RCON command (`place_entities` with many entities) is sent first as `mcp_part` pieces and
+then as an `mcp` call that names them.
+
+The "no tool round-trips" reasoning under *What the model sees* applies to the bus file,
+where each hop costs about a second. An RCON call answers in milliseconds, so the MCP side
+adds targeted queries: `item_report` (one item's rates and every group making or using
+it), `inspect_area` (the local view at any point, radius up to 64) and `inspect_entity`.
+
+Placing happens immediately. The MCP client's permission prompt is the confirmation. Builds
+go into the same `storage.builds` as the chat window's, so `undo` and `list_builds` cover
+both. `copy_block` and `copy_area` take `preview=true`, which reports the destination
+rectangle and how many entities are already in it without placing anything. That
+partly covers the "destination clearance" item in PROGRESS.md.
+
+`give_items` and `remove_items` call `LuaPlayer.insert` / `remove_item` on the player and
+report the count that actually moved, which is less than asked when the inventory is full.
+
+`factory_guide` returns `assets/mcp_guide.txt` followed by the system prompt's sections
+from SNAPSHOT FIELDS to just before HOW TO ANSWER. The prompt's chat formatting and marker
+syntax are left out because they only apply to the in-game window.
+
 ## Development
 
 ### What a change needs
@@ -212,7 +242,8 @@ mod/
   control.lua       GUI, events, remote interface, placement and clone execution
   snapshot.lua      state collection
 launcher-gui/
-  src/main.rs       egui UI, --check and --ask
+  src/main.rs       egui UI, --check, --ask and --mcp
+  src/mcp.rs        stdio MCP server over RCON
   src/factorio.rs   path discovery, save listing, mod mirroring
   src/session.rs    server lifecycle; runs the bridge on its own thread
   src/rcon.rs       Source RCON client
@@ -222,6 +253,7 @@ launcher-gui/
     markers.rs      marker parsing and the streaming hold-back
     providers.rs    the four backends
   assets/prompt.txt system prompt, embedded at build time
+  assets/mcp_guide.txt  MCP tool guide, served by factory_guide
 config.toml
 bridge/logs/        raw model answers (generated)
 serverdata/         server write-data (generated)

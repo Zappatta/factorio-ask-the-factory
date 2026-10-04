@@ -1046,7 +1046,9 @@ local function parse_coords(text)
   return {x = tonumber(x), y = tonumber(y)}
 end
 
-local function focus_point(player, question)
+local function focus_point(player, question, focus)
+  if focus and focus.x and focus.y then return focus, "coordinates the caller asked for" end
+
   local typed = parse_coords(question)
   if typed then return typed, "coordinates in the question" end
 
@@ -1058,7 +1060,7 @@ local function focus_point(player, question)
   return {x = player.position.x, y = player.position.y}, "the player's position"
 end
 
-function M.collect(player, tier, question)
+function M.collect(player, tier, question, focus)
   local full = tier ~= "compact"
   local force, surface = player.force, player.surface
 
@@ -1125,7 +1127,7 @@ function M.collect(player, tier, question)
     snap.logistics = collect_logistics(force, surface)
 
     section = "local_view"
-    local centre, why = focus_point(player, question)
+    local centre, why = focus_point(player, question, focus)
     local ok, view = pcall(collect_local_view, force, surface, centre, LOCAL_RADIUS)
     if ok then
       view.focused_on = why
@@ -1141,6 +1143,228 @@ function M.collect(player, tier, question)
   -- os.clock is nil in the sandbox. The error tally is the useful signal instead.
   if next(errors) then snap.meta.collector_errors = errors end
   return snap
+end
+
+-- ---------------------------------------------------------------------------
+-- Targeted queries for the MCP tools. A round trip is cheap there, so the model asks
+-- for one thing in detail instead of receiving everything in summary.
+-- ---------------------------------------------------------------------------
+
+local MAX_AREA_RADIUS = 64
+local MAX_ENTITIES_AT = 4
+local MAX_GROUP_LOCATIONS = 4
+local CRAFTING_TYPES = {["assembling-machine"] = true, ["furnace"] = true, ["rocket-silo"] = true}
+
+-- Each query gets its own error tally, so a dead API shows up in the answer that hit it.
+local function with_errors(label, fn)
+  errors = {}
+  section = label
+  local out = fn()
+  section = "?"
+  if next(errors) then out.collector_errors = errors end
+  return out
+end
+
+-- Halves are exact in binary, so these serialise cleanly where tenths would not.
+local function half(n)
+  return math.floor(n * 2 + 0.5) / 2
+end
+
+function M.area(player, x, y, radius)
+  radius = math.max(4, math.min(radius or LOCAL_RADIUS, MAX_AREA_RADIUS))
+  return with_errors("area", function()
+    return collect_local_view(player.force, player.surface, {x = x, y = y}, radius)
+  end)
+end
+
+local function entity_ref(e)
+  if not (e and e.valid) then return nil end
+  return {name = e.name, x = half(e.position.x), y = half(e.position.y)}
+end
+
+local function describe_entity(e, status_names, research_ings)
+  local out = {
+    name = e.name, type = e.type, force = e.force and e.force.name or nil,
+    x = half(e.position.x), y = half(e.position.y),
+  }
+  local d = safe(function() return e.direction end, nil)
+  if d and d ~= 0 then out.direction = dir_name(d) end
+
+  local st = safe(function() return e.status end, nil)
+  if st then out.status = status_names[st] or tostring(st) end
+
+  if CRAFTING_TYPES[e.type] then
+    out.recipe = machine_recipe(e)
+    out.crafting_progress = fmt(safe(function() return e.crafting_progress end, nil), 2)
+    out.products_finished = safe(function() return e.products_finished end, nil)
+  end
+  if out.status and SHORTAGE_STATUS[out.status] and (CRAFTING_TYPES[e.type] or e.type == "lab") then
+    out.short_on = missing_ingredients(e, research_ings)
+  end
+  if e.type == "mining-drill" then
+    local target = safe(function() return e.mining_target end, nil)
+    if target then
+      out.mining = target.name
+      out.resource_left = safe(function() return target.amount end, nil)
+    end
+  end
+
+  local inventories = {}
+  for i = 1, safe(function() return e.get_max_inventory_index() end, 0) do
+    local inv = safe(function() return e.get_inventory(i) end, nil)
+    if inv and not inv.is_empty() then
+      inventories[inv.name or tostring(i)] = items_line(contents_map(inv.get_contents()), 6)
+    end
+  end
+  if next(inventories) then out.inventories = inventories end
+
+  local fluids = {}
+  for i = 1, safe(function() return #e.fluidbox end, 0) do
+    local fb = safe(function() return e.fluidbox[i] end, nil)
+    if fb and fb.name then fluids[#fluids + 1] = fb.name .. " " .. round(fb.amount) end
+  end
+  if #fluids > 0 then out.fluids = fluids end
+
+  if e.type == "inserter" then
+    out.takes_from = dir_name(e.direction)
+    out.pickup_target = entity_ref(safe(function() return e.pickup_target end, nil))
+    out.drop_target = entity_ref(safe(function() return e.drop_target end, nil))
+    out.pickup_position = safe(function() return e.pickup_position end, nil)
+    out.drop_position = safe(function() return e.drop_position end, nil)
+    local held = safe(function() return e.held_stack end, nil)
+    if held and held.valid_for_read then out.holding = held.name .. " " .. held.count end
+  end
+
+  if e.type == "transport-belt" or e.type == "underground-belt" or e.type == "splitter" then
+    local lanes = {}
+    for li = 1, safe(function() return e.get_max_transport_line_index() end, 0) do
+      lanes[li] = items_line(contents_map(safe(function()
+        return e.get_transport_line(li).get_contents()
+      end, {})), 3)
+    end
+    out.lanes = lanes
+  end
+
+  if e.type == "train-stop" then out.station = safe(function() return e.backer_name end, nil) end
+  return out
+end
+
+function M.entity(player, x, y)
+  return with_errors("entity", function()
+    local surface = player.surface
+    local hits = safe(function()
+      return surface.find_entities_filtered{position = {x = x, y = y}}
+    end, {})
+    local why = "at this position"
+    if #hits == 0 then
+      -- An area matches footprints, where radius matches centres. Coordinates elsewhere
+      -- are rounded to whole tiles, which can land in the gap between two machines.
+      hits = safe(function()
+        return surface.find_entities_filtered{area = {{x - 1.5, y - 1.5}, {x + 1.5, y + 1.5}}}
+      end, {})
+      why = "nothing exactly here, these reach within 1.5 tiles"
+    end
+
+    -- Ore under a machine is noise unless it is all there is.
+    local kept = {}
+    for _, e in pairs(hits) do
+      if e.type ~= "resource" then kept[#kept + 1] = e end
+    end
+    if #kept == 0 then kept = hits end
+    if #kept == 0 then
+      return {x = x, y = y, entities = {}, note = "nothing within 1.5 tiles of this point"}
+    end
+    kept = nearest_first(kept, {x = x, y = y}, MAX_ENTITIES_AT)
+
+    local research_ings = safe(function()
+      local cr = player.force.current_research
+      return cr and cr.research_unit_ingredients or nil
+    end, nil)
+    local status_names = status_lookup()
+    local rows = {}
+    for i, e in ipairs(kept) do rows[i] = describe_entity(e, status_names, research_ings) end
+    return {x = x, y = y, found = why, entities = rows,
+            note = "An inserter's takes_from is the side it PICKS UP from."}
+  end)
+end
+
+local function group_summary(g)
+  local entry = {recipe = g.produces, machine_count = g.count, machines = g.machines, status = g.status}
+  if next(g.short_on) then entry.short_on = g.short_on end
+  if next(g.fed_by) then entry.fed_by = top_entries(g.fed_by, MAX_FEED_ENTRIES) end
+  if next(g.outputs_to) then entry.outputs_to = top_entries(g.outputs_to, MAX_FEED_ENTRIES) end
+  if #g.positions > 0 then
+    local clusters = cluster_positions(g.positions)
+    local keep = {}
+    for j = 1, math.min(#clusters, MAX_GROUP_LOCATIONS) do keep[j] = clusters[j] end
+    entry.locations = keep
+  end
+  return entry
+end
+
+function M.item(player, name)
+  return with_errors("item", function()
+    local force, surface = player.force, player.surface
+    local is_fluid = fluid_prototypes()[name] ~= nil
+    if not is_fluid and not item_prototypes()[name] then
+      return {error = "no item or fluid is called " .. tostring(name)}
+    end
+
+    local stats = is_fluid and fluid_stats(force, surface) or item_stats(force, surface)
+    local minute, hour = precision("one_minute"), precision("one_hour")
+    local made_m, used_m = flow(stats, name, "output", minute), flow(stats, name, "input", minute)
+    local out = {
+      name = name, kind = is_fluid and "fluid" or "item",
+      made_last_min = round(made_m), used_last_min = round(used_m),
+      net_last_min = round(made_m - used_m),
+      made_last_hour = round(flow(stats, name, "output", hour)),
+      used_last_hour = round(flow(stats, name, "input", hour)),
+      lifetime_made = round(safe(function() return stats.get_output_count(name) end, 0)),
+    }
+
+    local collected = collect_machines(force, surface, true)
+    collect_feeds(force, surface, collected.by_unit)
+    local research_needs = false
+    for _, ing in pairs(safe(function()
+      local cr = force.current_research
+      return cr and cr.research_unit_ingredients or nil
+    end, {}) ) do
+      if ing.name == name then research_needs = true end
+    end
+
+    local makers, users = {}, {}
+    for _, g in ipairs(collected.order) do
+      local makes, uses = false, false
+      local recipe = g.is_recipe and prototypes.recipe[g.produces] or nil
+      if recipe then
+        for _, p in pairs(recipe.products) do if p.name == name then makes = true end end
+        for _, i in pairs(recipe.ingredients) do if i.name == name then uses = true end end
+      elseif g.produces == "mining " .. name then
+        makes = true
+      elseif research_needs then
+        local proto = prototypes.entity[next(g.machines)]
+        uses = proto ~= nil and proto.type == "lab"
+      end
+      if makes then makers[#makers + 1] = group_summary(g) end
+      if uses then users[#users + 1] = group_summary(g) end
+    end
+    out.made_by = makers
+    out.used_by = users
+
+    if not is_fluid then
+      local stored = 0
+      local nets = safe(function() return force.logistic_networks[surface.name] end, {})
+      for _, net in pairs(nets) do
+        stored = stored + safe(function() return net.get_item_count(name) end, 0)
+      end
+      out.in_logistic_networks = stored
+    end
+
+    out.note = "Rates are counts over the window on this surface. made_by and used_by are "
+            .. "every machine group whose recipe produces or consumes this, with status, "
+            .. "short_on, what their inserters touch, and up to four cluster locations."
+    return out
+  end)
 end
 
 return M
